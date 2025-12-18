@@ -170,6 +170,38 @@ def remapMaterialIDsToGlobal(
 
     return global_material_ids, globMaterialMapping
 
+def remapVolumeIDsToGlobal(
+    glob_mapping_json_path: str,
+    local_vol_map: dict,
+    local_volume_ids
+) -> tuple[np.ndarray, dict]:
+    """Vectorized volume ID remapping using dictionary lookups"""
+    if os.path.exists(glob_mapping_json_path):
+        globVolumeMapping = loadMapping(glob_mapping_json_path)
+    else:
+        globVolumeMapping = {}
+
+    local_volume_ids = np.array(local_volume_ids)
+    unique_local_ids = np.unique(local_volume_ids)
+    mapping_dict = {}
+    max_global_id = max(globVolumeMapping.values()) if globVolumeMapping else -1
+
+    # Build mapping dictionary for unique IDs
+    for local_id in unique_local_ids:
+        local_name = local_vol_map[local_id]
+        if local_name in globVolumeMapping:
+            mapping_dict[local_id] = globVolumeMapping[local_name]
+        else:
+            max_global_id += 1
+            globVolumeMapping[local_name] = max_global_id
+            mapping_dict[local_id] = max_global_id
+
+    # Vectorize the mapping process
+    vectorized_mapper = np.vectorize(mapping_dict.get)
+    global_volume_ids = vectorized_mapper(local_volume_ids)
+
+    return global_volume_ids, globVolumeMapping
+
 def create_global_material_mapping(all_materials, existing_mapping_path):
     """Erstellt vollständiges globales Material-Mapping"""
     if os.path.exists(existing_mapping_path):
@@ -186,6 +218,29 @@ def create_global_material_mapping(all_materials, existing_mapping_path):
         if material not in global_mapping:
             max_id += 1
             global_mapping[material] = max_id
+    
+    # Mapping speichern
+    with open(existing_mapping_path, 'w') as f:
+        json.dump(global_mapping, f, indent=2)
+    
+    return global_mapping
+
+def create_global_volume_mapping(all_volumes, existing_mapping_path):
+    """Erstellt vollständiges globales Volume-Mapping"""
+    if os.path.exists(existing_mapping_path):
+        with open(existing_mapping_path, 'r') as f:
+            global_mapping = json.load(f)
+    else:
+        global_mapping = {}
+    
+    # Höchste existierende ID finden
+    max_id = max(global_mapping.values()) if global_mapping else -1
+    
+    # Neue Volumes hinzufügen
+    for volume in all_volumes:
+        if volume not in global_mapping:
+            max_id += 1
+            global_mapping[volume] = max_id
     
     # Mapping speichern
     with open(existing_mapping_path, 'w') as f:
@@ -210,6 +265,22 @@ def collect_all_materials_first(files):
     print(f"Gefunden: {len(all_materials)} einzigartige Materialien")
     return all_materials
 
+def collect_all_volumes_first(files):
+    """Sammelt alle physikalischen Volumes aus allen Files VOR der parallelen Verarbeitung"""
+    print("Sammle alle physikalischen Volumes aus allen Files...")
+    all_volumes = set()
+    
+    for file_path in files:            
+        try:
+            with h5py.File(file_path, 'r') as f:
+                volume_names = [x.decode() for x in f["hit/physVolumes/physVolumeNames"]["pages"][:]]
+                all_volumes.update(volume_names)
+        except Exception as e:
+            print(f"Fehler beim Lesen von {file_path}: {e}")
+            continue
+    
+    print(f"Gefunden: {len(all_volumes)} einzigartige physikalische Volumes")
+    return all_volumes
 
 def checkRadialMomentumVectorized(x, y, z, px, py, pz):
     """Vectorized radial momentum calculation"""
@@ -239,60 +310,6 @@ def build_voxel_tree(voxels):
         return None
     centers = [voxel['center'] for voxel in voxels]
     return KDTree(centers)
-
-
-def create_or_open_output_file(output_path, file_index, voxel_indices, mat_map, radius, suffix=""):
-    """Erstellt eine neue HDF5-Datei oder öffnet eine bestehende"""
-    output_file = os.path.join(output_path, f"resum_output_{file_index}{suffix}.hdf5")
-    
-    # Wenn Datei bereits existiert, prüfen ob sie gültig ist
-    if os.path.exists(output_file):
-        try:
-            with h5py.File(output_file, 'r') as f:
-                # Prüfen ob Grundstruktur vorhanden
-                if 'phi' in f and 'target' in f and 'voxels' in f:
-                    print(f"Bestehende Output-Datei gefunden: {output_file}")
-                    return output_file
-        except:
-            print(f"Bestehende Datei ist korrupt, erstelle neue: {output_file}")
-            os.remove(output_file)
-    
-    # Neue Datei erstellen
-    print(f"Erstelle neue Output-Datei: {output_file}")
-    with h5py.File(output_file, 'w') as out:
-        # Gruppen erstellen
-        phi_grp = out.create_group("phi")
-        target_grp = out.create_group("target")
-        theta_grp = out.create_group("theta")
-        mat_map_grp = out.create_group("mat_map")
-        voxels_grp = out.create_group("voxels")
-        
-        # Statische Daten
-        theta_grp.create_dataset("inner_radius_in_mm", data=radius)
-        out.create_dataset("primaries", data=0)
-        
-        # Material mapping
-        for key, value in mat_map.items():
-            if key == "":
-                key = "no_material"
-            mat_map_grp.create_dataset(str(key), data=int(value))
-        
-        # Voxel data schreiben
-        for voxel in voxel_indices:  # voxel_indices ist hier voxel_data
-            if isinstance(voxel, dict):
-                voxel_grp = voxels_grp.create_group(str(voxel['index']))
-                voxel_grp.create_dataset("center", data=np.array(voxel['center'], dtype='f'))
-                dt = h5py.string_dtype(encoding='utf-8')
-                voxel_grp.create_dataset("layer", data=voxel['layer'], dtype=dt)
-                
-                corners = np.array(voxel['corners'])
-                corners_grp = voxel_grp.create_group("corners")
-                corners_grp.create_dataset("x", data=corners[:, 0])
-                corners_grp.create_dataset("y", data=corners[:, 1])
-                corners_grp.create_dataset("z", data=corners[:, 2])
-    
-    return output_file
-
     
 def defineZylinder(geometry_name):
     valid_geometry_names = ["currentDist"]
@@ -333,7 +350,7 @@ def defineZylinder(geometry_name):
 def process_single_file(args):
     """Verarbeitet eine einzelne HDF5-Datei"""
     (file_path, voxel_tree, voxel_data, voxel_indices, 
-     materialMappingPath, geometry_params, validation_set) = args
+     materialMappingPath, volumeMappingPath, geometry_params, validation_set) = args
     
     # Geometrie-Parameter entpacken
     h_zylinder = geometry_params['h_zylinder']
@@ -370,7 +387,8 @@ def process_single_file(args):
         nC_z = f['hit']['MyNeutronCaptureOutput']['nC_z_position_in_m']['pages'][:]
         gamma_amount = f['hit']['MyNeutronCaptureOutput']['nC_gamma_amount']['pages'][:]
         gamma_tot_energy = f['hit']['MyNeutronCaptureOutput']['nC_gamma_total_energy_in_keV']['pages'][:]
-        material_ids = f['hit']['MyNeutronCaptureOutput']['nC_material_id']['pages'][:]
+        nc_material_ids = f['hit']['MyNeutronCaptureOutput']['nC_material_id']['pages'][:]
+        nc_volume_ids = f['hit']['MyNeutronCaptureOutput']['nC_phys_vol_id']['pages'][:]
         
         # Gamma-Daten lesen (1-4)
         gamma_data_nc = {}
@@ -386,7 +404,15 @@ def process_single_file(args):
         mapping_names = [x.decode() for x in f["hit/materials/materialNames"]["pages"][:]]
         mapping_ids = f["hit/materials/materialsID"]["pages"][:]
         local_mat_map = dict(zip(mapping_ids, mapping_names))
-        globalMaterialIDs, _ = remapMaterialIDsToGlobal(materialMappingPath, local_mat_map, material_ids)
+        globalMaterialIDs, _ = remapMaterialIDsToGlobal(materialMappingPath, local_mat_map, nc_material_ids)
+
+        # Umwandlung von lokalen zu globalen Volume-Mappings
+        ##############################################
+        # Decode volume names and build local mapping
+        volume_names = [x.decode() for x in f["hit/physVolumes/physVolumeNames"]["pages"][:]]
+        volume_ids = f["hit/physVolumes/physVolumesID"]["pages"][:]
+        local_vol_map = dict(zip(volume_ids, volume_names))
+        globalVolumeIDs, _ = remapVolumeIDsToGlobal(volumeMappingPath, local_vol_map, nc_volume_ids)
 
         # Erstelle Dictionary für NC-Daten basierend auf (evtid, nC_id)
         nc_data_dict = {}
@@ -399,6 +425,7 @@ def process_single_file(args):
                 'gamma_amount': gamma_amount[idx],
                 'gamma_tot_energy': gamma_tot_energy[idx],
                 'material_id': globalMaterialIDs[idx],
+                'volume_id': globalVolumeIDs[idx],
                 'gamma_energies': [gamma_data_nc[f'gamma{i}_E'][idx] for i in range(1, 5)],
                 'gamma_px': [gamma_data_nc[f'gamma{i}_px'][idx] for i in range(1, 5)],
                 'gamma_py': [gamma_data_nc[f'gamma{i}_py'][idx] for i in range(1, 5)],
@@ -406,8 +433,8 @@ def process_single_file(args):
             }
 
         # Speicher für NC-Daten freigeben (außer nc_data_dict)
-        del nc_evtid, nc_nC_id, nC_x, nC_y, nC_z, gamma_amount, gamma_tot_energy, material_ids
-        del gamma_data_nc, globalMaterialIDs
+        del nc_evtid, nc_nC_id, nC_x, nC_y, nC_z, gamma_amount, gamma_tot_energy, nc_material_ids, nc_volume_ids
+        del gamma_data_nc, globalMaterialIDs, globalVolumeIDs
         gc.collect()
         
         # print_memory_usage("Nach NC-Dict erstellen")
@@ -521,6 +548,7 @@ def process_single_file(args):
                 y = nc_info['nC_y']
                 z = nc_info['nC_z']
                 mat_id = nc_info['material_id']
+                vol_id = nc_info['volume_id']
                 n_gamma = max(0, nc_info['gamma_amount'])
                 e_tot = max(0, nc_info['gamma_tot_energy'])
                 
@@ -535,7 +563,7 @@ def process_single_file(args):
                         e, px, py, pz = 0.0, 0.0, 0.0, 0.0
                     gamma_row.extend([e, px, py, pz])
                 
-                phi_row = [x, y, z, mat_id, n_gamma, e_tot] + gamma_row                
+                phi_row = [x, y, z, mat_id, vol_id, n_gamma, e_tot] + gamma_row                
                 target_row = [voxel_counter.get(str(voxel_idx), 0) for voxel_idx in voxel_indices]
 
                 if (e_id, nc_id) in validation_set:     
@@ -570,7 +598,7 @@ def append_results_to_hdf5(output_file, result_data, voxel_indices, weight, data
     if len(result_data) == 0:
         return 0
     
-    phi_columns = ["xNC_mm", "yNC_mm", "zNC_mm", "matID", "#gamma", "E_gamma_tot_keV", 
+    phi_columns = ["xNC_mm", "yNC_mm", "zNC_mm", "matID", "volID", "#gamma", "E_gamma_tot_keV", 
                    "gammaE1_keV", "gammapx1", "gammapy1", "gammapz1",
                    "gammaE2_keV", "gammapx2", "gammapy2", "gammapz2",
                    "gammaE3_keV", "gammapx3", "gammapy3", "gammapz3",
@@ -692,7 +720,7 @@ def create_train_val_split(all_nc_pairs, val_fraction=0.2, random_seed=42):
     return train_pairs, val_pairs
 
 def process_files_sequentially(files, voxel_tree, voxel_data, voxel_indices, 
-                             material_mapping_path, geometry_params, 
+                             material_mapping_path, volume_mapping_path, geometry_params, 
                              output_file_train, output_file_val, weight,
                              progress_tracker, validation_set):     
     """Verarbeitet Files sequenziell und schreibt nach jedem File"""
@@ -712,7 +740,7 @@ def process_files_sequentially(files, voxel_tree, voxel_data, voxel_indices,
         try:
             # File verarbeiten
             args = (file_path, voxel_tree, voxel_data, voxel_indices, 
-                   material_mapping_path, geometry_params, validation_set)  # [GEÄNDERT] - validation_set hinzugefügt
+                   material_mapping_path, volume_mapping_path, geometry_params, validation_set)  # [GEÄNDERT] - validation_set hinzugefügt
             result = process_single_file(args)
             
             # [GEÄNDERT] Ergebnisse in beide HDF5-Dateien schreiben
@@ -841,11 +869,11 @@ class ProgressTracker:
 
 
 # ----------------------------------------------------------------------------
-# 2. GEÄNDERTE FUNKTION: create_or_open_output_file
+# Allgemeine Funktionen
 # ----------------------------------------------------------------------------
-def create_or_open_output_file(output_path, file_index, voxel_indices, mat_map, radius, suffix=""):  # [GEÄNDERT] - suffix Parameter hinzugefügt
+def create_or_open_output_file(output_path, file_index, voxel_indices, mat_map, vol_map, radius, suffix=""):
     """Erstellt eine neue HDF5-Datei oder öffnet eine bestehende"""
-    output_file = os.path.join(output_path, f"resum_output_{file_index}{suffix}.hdf5")  # [GEÄNDERT] - suffix eingefügt
+    output_file = os.path.join(output_path, f"resum_output_{file_index}{suffix}.hdf5") 
     
     # Wenn Datei bereits existiert, prüfen ob sie gültig ist
     if os.path.exists(output_file):
@@ -867,6 +895,7 @@ def create_or_open_output_file(output_path, file_index, voxel_indices, mat_map, 
         target_grp = out.create_group("target")
         theta_grp = out.create_group("theta")
         mat_map_grp = out.create_group("mat_map")
+        vol_map_grp = out.create_group("vol_map")
         voxels_grp = out.create_group("voxels")
         
         # Statische Daten
@@ -878,6 +907,12 @@ def create_or_open_output_file(output_path, file_index, voxel_indices, mat_map, 
             if key == "":
                 key = "no_material"
             mat_map_grp.create_dataset(str(key), data=int(value))
+
+        # Volume mapping
+        for key, value in vol_map.items():
+            if key == "":
+                key = "no_volume"
+            vol_map_grp.create_dataset(str(key), data=int(value))
         
         # Voxel data schreiben
         for voxel in voxel_indices:  # voxel_indices ist hier voxel_data
@@ -894,396 +929,6 @@ def create_or_open_output_file(output_path, file_index, voxel_indices, mat_map, 
                 corners_grp.create_dataset("z", data=corners[:, 2])
     
     return output_file
-
-
-# ----------------------------------------------------------------------------
-# 3. GEÄNDERTE FUNKTION: process_single_file
-# ----------------------------------------------------------------------------
-def process_single_file(args):
-    """Verarbeitet eine einzelne HDF5-Datei"""
-    (file_path, voxel_tree, voxel_data, voxel_indices, 
-     materialMappingPath, geometry_params, validation_set) = args  # [GEÄNDERT] - validation_set hinzugefügt
-    
-    # Geometrie-Parameter entpacken
-    h_zylinder = geometry_params['h_zylinder']
-    
-    print(f"Worker {mp.current_process().pid}: Verarbeite {os.path.basename(file_path)}")
-    
-    phi_data_train = []    # [GEÄNDERT] - war phi_data
-    target_data_train = [] # [GEÄNDERT] - war target_data
-    phi_data_val = []      # [NEU]
-    target_data_val = []   # [NEU]
-    unassigned_count = 0
-
-    # Anpassbare Chunk-Größe basierend auf verfügbarem Speicher
-    available_mem_gb = psutil.virtual_memory().available / (1024**3)
-    if available_mem_gb > 50:
-        CHUNK_SIZE = 20000
-    elif available_mem_gb > 30:
-        CHUNK_SIZE = 15000
-    elif available_mem_gb > 20:
-        CHUNK_SIZE = 10000
-    else:
-        CHUNK_SIZE = 5000
-
-    with h5py.File(file_path, 'r') as f:
-        # Neutron Capture Output Daten lesen
-        ##############################################
-        nc_evtid = f['hit']['MyNeutronCaptureOutput']['evtid']['pages'][:]
-        nc_nC_id = f['hit']['MyNeutronCaptureOutput']['nC_track_id']['pages'][:]
-        nC_x = f['hit']['MyNeutronCaptureOutput']['nC_x_position_in_m']['pages'][:]
-        nC_y = f['hit']['MyNeutronCaptureOutput']['nC_y_position_in_m']['pages'][:]
-        nC_z = f['hit']['MyNeutronCaptureOutput']['nC_z_position_in_m']['pages'][:]
-        gamma_amount = f['hit']['MyNeutronCaptureOutput']['nC_gamma_amount']['pages'][:]
-        gamma_tot_energy = f['hit']['MyNeutronCaptureOutput']['nC_gamma_total_energy_in_keV']['pages'][:]
-        material_ids = f['hit']['MyNeutronCaptureOutput']['nC_material_id']['pages'][:]
-        
-        # Gamma-Daten lesen (1-4)
-        gamma_data_nc = {}
-        for i in range(1, 5):
-            gamma_data_nc[f'gamma{i}_px'] = f['hit']['MyNeutronCaptureOutput'][f'gamma{i}_px']['pages'][:]
-            gamma_data_nc[f'gamma{i}_py'] = f['hit']['MyNeutronCaptureOutput'][f'gamma{i}_py']['pages'][:]
-            gamma_data_nc[f'gamma{i}_pz'] = f['hit']['MyNeutronCaptureOutput'][f'gamma{i}_pz']['pages'][:]
-            gamma_data_nc[f'gamma{i}_E'] = f['hit']['MyNeutronCaptureOutput'][f'gamma{i}_E']['pages'][:]
-      
-        # Umwandlung von lokalen zu globalen Mappings
-        ##############################################
-        # Decode material names and build local mapping
-        mapping_names = [x.decode() for x in f["hit/materials/materialNames"]["pages"][:]]
-        mapping_ids = f["hit/materials/materialsID"]["pages"][:]
-        local_mat_map = dict(zip(mapping_ids, mapping_names))
-        globalMaterialIDs, _ = remapMaterialIDsToGlobal(materialMappingPath, local_mat_map, material_ids)
-
-        # Erstelle Dictionary für NC-Daten basierend auf (evtid, nC_id)
-        nc_data_dict = {}
-        for idx in range(len(nc_evtid)):
-            key = (nc_evtid[idx], nc_nC_id[idx])
-            nc_data_dict[key] = {
-                'nC_x': nC_x[idx],
-                'nC_y': nC_y[idx], 
-                'nC_z': nC_z[idx],
-                'gamma_amount': gamma_amount[idx],
-                'gamma_tot_energy': gamma_tot_energy[idx],
-                'material_id': globalMaterialIDs[idx],
-                'gamma_energies': [gamma_data_nc[f'gamma{i}_E'][idx] for i in range(1, 5)],
-                'gamma_px': [gamma_data_nc[f'gamma{i}_px'][idx] for i in range(1, 5)],
-                'gamma_py': [gamma_data_nc[f'gamma{i}_py'][idx] for i in range(1, 5)],
-                'gamma_pz': [gamma_data_nc[f'gamma{i}_pz'][idx] for i in range(1, 5)]
-            }
-
-        # Speicher für NC-Daten freigeben (außer nc_data_dict)
-        del nc_evtid, nc_nC_id, nC_x, nC_y, nC_z, gamma_amount, gamma_tot_energy, material_ids
-        del gamma_data_nc, globalMaterialIDs
-        gc.collect()
-                
-        # Gesamtanzahl optischer Photonen
-        total_optical_events = len(f['hit']['optical']['x_position_in_m']['pages'])
-
-        # Cut-Parameter
-        z_cut_pit = -4979
-        z_cut_bot = -4979 # Eigentlich 4179
-        z_cut_top = z_cut_bot + h_zylinder - 2 # Fläche ist 1mm dick und startet bei h_zyl - 1
-
-        # Chunk-basierte Verarbeitung der optischen Daten
-        num_chunks = (total_optical_events - 1) // CHUNK_SIZE + 1
-        
-        for chunk_idx in range(num_chunks):
-            chunk_start = chunk_idx * CHUNK_SIZE
-            chunk_end = min(chunk_start + CHUNK_SIZE, total_optical_events)
-            
-            # Nur aktuellen Chunk laden mit optimierten Datentypen
-            x_chunk = np.array(f['hit']['optical']['x_position_in_m']['pages'][chunk_start:chunk_end], dtype=np.float32) * 1000
-            y_chunk = np.array(f['hit']['optical']['y_position_in_m']['pages'][chunk_start:chunk_end], dtype=np.float32) * 1000
-            z_chunk = np.array(f['hit']['optical']['z_position_in_m']['pages'][chunk_start:chunk_end], dtype=np.float32) * 1000
-            px_chunk = np.array(f['hit']['optical']['x_momentum_direction']['pages'][chunk_start:chunk_end], dtype=np.float32)
-            py_chunk = np.array(f['hit']['optical']['y_momentum_direction']['pages'][chunk_start:chunk_end], dtype=np.float32)
-            pz_chunk = np.array(f['hit']['optical']['z_momentum_direction']['pages'][chunk_start:chunk_end], dtype=np.float32)
-            
-            photon_evtid_chunk = f['hit']['optical']['evtid']['pages'][chunk_start:chunk_end]
-            photon_nC_id_chunk = f['hit']['optical']['nC_track_id']['pages'][chunk_start:chunk_end]
-            photon_gamma_energies_chunk = f['hit']['optical']['photon_gamma_kinetic_energy_in_keV']['pages'][chunk_start:chunk_end]
-        
-            # Momentum filtering für diesen Chunk
-            mask_bot = (z_chunk <= z_cut_bot)
-            mask_top = (z_chunk >= z_cut_top)
-            mask_barrel = ~mask_bot & ~mask_top
-            
-            mask_bot_valid = (pz_chunk <= 0)
-            mask_top_valid = (pz_chunk >= 0)
-            
-            # Nur für barrel region berechnen
-            mask_barrel_valid = np.zeros(np.sum(mask_barrel), dtype=bool)
-            if np.any(mask_barrel):
-                mask_barrel_valid = checkRadialMomentumVectorized(
-                    x_chunk[mask_barrel], y_chunk[mask_barrel], z_chunk[mask_barrel],
-                    px_chunk[mask_barrel], py_chunk[mask_barrel], pz_chunk[mask_barrel]
-                )
-            
-            # Combine masks
-            final_mask = np.zeros_like(z_chunk, dtype=bool)
-            final_mask[mask_bot] = mask_bot_valid[mask_bot]
-            final_mask[mask_top] = mask_top_valid[mask_top]
-            final_mask[mask_barrel] = mask_barrel_valid
-            
-            # Gefilterte Daten
-            x_filtered = x_chunk[final_mask]
-            y_filtered = y_chunk[final_mask]
-            z_filtered = z_chunk[final_mask]
-            photon_evtid_filtered = photon_evtid_chunk[final_mask]
-            photon_nC_id_filtered = photon_nC_id_chunk[final_mask]
-            photon_gamma_energies_filtered = photon_gamma_energies_chunk[final_mask]
-            
-            # Nicht mehr benötigte Arrays löschen
-            del x_chunk, y_chunk, z_chunk, px_chunk, py_chunk, pz_chunk
-            del photon_evtid_chunk, photon_nC_id_chunk, photon_gamma_energies_chunk
-            del mask_bot, mask_top, mask_barrel, mask_bot_valid, mask_top_valid, mask_barrel_valid, final_mask
-            gc.collect()
-            
-            # Gruppierung der Photonen nach (evtid, nC_id)
-            photon_groups = defaultdict(list)
-            for idx in range(len(photon_evtid_filtered)):
-                photon_groups[(photon_evtid_filtered[idx], photon_nC_id_filtered[idx])].append(idx)
-            
-            # Verarbeitung jeder Gruppe
-            for (e_id, nc_id), photon_indices in photon_groups.items():
-                if (e_id, nc_id) not in nc_data_dict:
-                    continue
-                    
-                nc_info = nc_data_dict[(e_id, nc_id)]
-                
-                voxel_counter = Counter()
-                gamma_number_list = []
-                
-                for i in photon_indices:
-                    x, y, z = x_filtered[i], y_filtered[i], z_filtered[i]
-                    voxel_index = assignToNearestVoxel(voxel_tree, voxel_data, (x, y, z))
-                    if voxel_index == "-1":
-                        unassigned_count += 1
-                    else:
-                        voxel_counter[voxel_index] += 1
-                    
-                    photon_gamma_energy = photon_gamma_energies_filtered[i]
-                    gamma_number = 0
-                    
-                    for gamma_idx, gamma_energy in enumerate(nc_info['gamma_energies']):
-                        if abs(photon_gamma_energy - gamma_energy) < 0.1:
-                            gamma_number = gamma_idx + 1
-                            break
-                    
-                    gamma_number_list.append(gamma_number)
-                
-                # Phi Data erstellen
-                x = nc_info['nC_x']
-                y = nc_info['nC_y']
-                z = nc_info['nC_z']
-                mat_id = nc_info['material_id']
-                n_gamma = max(0, nc_info['gamma_amount'])
-                e_tot = max(0, nc_info['gamma_tot_energy'])
-                
-                gamma_row = []
-                for i in range(4):
-                    e = nc_info['gamma_energies'][i]
-                    px = nc_info['gamma_px'][i]
-                    py = nc_info['gamma_py'][i]
-                    pz = nc_info['gamma_pz'][i]
-                    
-                    if e < 0:
-                        e, px, py, pz = 0.0, 0.0, 0.0, 0.0
-                    gamma_row.extend([e, px, py, pz])
-                
-                phi_row = [x, y, z, mat_id, n_gamma, e_tot] + gamma_row
-                target_row = [voxel_counter.get(str(voxel_idx), 0) for voxel_idx in voxel_indices]
-                
-                # [NEU] Train/Val Split: prüfen ob dieses NC-Event im Validierungsset ist
-                if (e_id, nc_id) in validation_set:     # [NEU]
-                    phi_data_val.append(phi_row)        # [NEU]
-                    target_data_val.append(target_row)  # [NEU]
-                else:                                   # [NEU]
-                    phi_data_train.append(phi_row)      # [GEÄNDERT] - war phi_data
-                    target_data_train.append(target_row)# [GEÄNDERT] - war target_data
-            
-            # Chunk-Daten explizit löschen
-            del x_filtered, y_filtered, z_filtered
-            del photon_evtid_filtered, photon_nC_id_filtered, photon_gamma_energies_filtered
-            del photon_groups
-            gc.collect()
-    
-    # [GEÄNDERT] Return jetzt mit train und val Daten
-    return {
-        'phi_data_train': np.array(phi_data_train, dtype=np.float32) if phi_data_train else np.array([]),
-        'target_data_train': np.array(target_data_train, dtype=np.int32) if target_data_train else np.array([]),
-        'phi_data_val': np.array(phi_data_val, dtype=np.float32) if phi_data_val else np.array([]),      # [NEU]
-        'target_data_val': np.array(target_data_val, dtype=np.int32) if target_data_val else np.array([]),# [NEU]
-        'unassigned_count': unassigned_count,
-        'file_processed': os.path.basename(file_path)
-    }
-
-
-# ----------------------------------------------------------------------------
-# 4. GEÄNDERTE FUNKTION: append_results_to_hdf5
-# ----------------------------------------------------------------------------
-def append_results_to_hdf5(output_file, result_data, voxel_indices, weight, dataset_type='train'):  # [GEÄNDERT] - result anstatt result
-    """Fügt Ergebnisse eines einzelnen Files zur HDF5-Datei hinzu"""
-    if len(result_data) == 0:  # [GEÄNDERT]
-        return 0
-    
-    phi_columns = ["xNC_mm", "yNC_mm", "zNC_mm", "matID", "#gamma", "E_gamma_tot_keV", 
-                   "gammaE1_keV", "gammapx1", "gammapy1", "gammapz1",
-                   "gammaE2_keV", "gammapx2", "gammapy2", "gammapz2",
-                   "gammaE3_keV", "gammapx3", "gammapy3", "gammapz3",
-                   "gammaE4_keV", "gammapx4", "gammapy4", "gammapz4"]
-
-    phi_data = result_data['phi_data']      # [GEÄNDERT]
-    target_data = result_data['target_data']# [GEÄNDERT]
-    num_entries = len(phi_data)
-    
-    if num_entries == 0:
-        return 0
-    
-    weights = np.full(num_entries, weight, dtype=np.float32)
-
-    with h5py.File(output_file, 'a') as out:
-        phi_grp = out['phi']
-        target_grp = out['target']
-        
-        # Für phi data: entweder erweitern oder neu erstellen
-        for i, col_name in enumerate(phi_columns):
-            if col_name in phi_grp:
-                # Dataset existiert, erweitern
-                existing_data = phi_grp[col_name][:]
-                new_data = np.concatenate([existing_data, phi_data[:, i]])
-                del phi_grp[col_name]
-                phi_grp.create_dataset(col_name, data=new_data)
-            else:
-                # Neues Dataset erstellen
-                phi_grp.create_dataset(col_name, data=phi_data[:, i])
-        
-        # Für target data: entweder erweitern oder neu erstellen
-        for i, voxel_idx in enumerate(voxel_indices):
-            voxel_str = str(voxel_idx)
-            if voxel_str in target_grp:
-                # Dataset existiert, erweitern
-                existing_data = target_grp[voxel_str][:]
-                new_data = np.concatenate([existing_data, target_data[:, i]])
-                del target_grp[voxel_str]
-                target_grp.create_dataset(voxel_str, data=new_data)
-            else:
-                # Neues Dataset erstellen
-                target_grp.create_dataset(voxel_str, data=target_data[:, i])
-        
-        # Weights erweitern oder neu erstellen
-        if "weights" in out:
-            existing_weights = out["weights"][:]
-            new_weights = np.concatenate([existing_weights, weights])
-            del out["weights"]
-            out.create_dataset("weights", data=new_weights)
-        else:
-            out.create_dataset("weights", data=weights)
-    
-    return num_entries
-
-
-# ----------------------------------------------------------------------------
-# 5. NEUE FUNKTION: collect_all_nc_pairs
-# ----------------------------------------------------------------------------
-def collect_all_nc_pairs(files):  # [NEU - GANZE FUNKTION]
-    """Sammelt alle (evtid, nC_id) Paare aus allen Files"""
-    print("Sammle alle Neutron Capture Events für Train/Val Split...")
-    all_nc_pairs = set()
-    
-    for file_path in files:
-        try:
-            with h5py.File(file_path, 'r') as f:
-                evtid = f['hit']['MyNeutronCaptureOutput']['evtid']['pages'][:]
-                nC_id = f['hit']['MyNeutronCaptureOutput']['nC_track_id']['pages'][:]
-                pairs = zip(evtid, nC_id)
-                all_nc_pairs.update(pairs)
-        except Exception as e:
-            print(f"Fehler beim Lesen von {file_path}: {e}")
-            continue
-    
-    print(f"Gefunden: {len(all_nc_pairs)} einzigartige NC-Events")
-    return all_nc_pairs
-
-
-# ----------------------------------------------------------------------------
-# 6. NEUE FUNKTION: create_train_val_split
-# ----------------------------------------------------------------------------
-def create_train_val_split(all_nc_pairs, val_fraction=0.2, random_seed=42):  # [NEU - GANZE FUNKTION]
-    """Erstellt zufälliges Train/Val Split der NC-Events"""
-    np.random.seed(random_seed)
-    all_pairs_list = list(all_nc_pairs)
-    np.random.shuffle(all_pairs_list)
-    
-    split_idx = int(len(all_pairs_list) * (1 - val_fraction))
-    train_pairs = set(all_pairs_list[:split_idx])
-    val_pairs = set(all_pairs_list[split_idx:])
-    
-    print(f"Train/Val Split erstellt:")
-    print(f"  Training: {len(train_pairs)} NC-Events ({(1-val_fraction)*100:.0f}%)")
-    print(f"  Validation: {len(val_pairs)} NC-Events ({val_fraction*100:.0f}%)")
-    
-    return train_pairs, val_pairs
-
-
-# ----------------------------------------------------------------------------
-# 7. GEÄNDERTE FUNKTION: process_files_sequentially
-# ----------------------------------------------------------------------------
-def process_files_sequentially(files, voxel_tree, voxel_data, voxel_indices, 
-                             material_mapping_path, geometry_params, 
-                             output_file_train, output_file_val, weight,  # [GEÄNDERT] - 2 output files
-                             progress_tracker, validation_set):           # [GEÄNDERT] - validation_set hinzugefügt
-    """Verarbeitet Files sequenziell und schreibt nach jedem File"""
-    
-    remaining_files = progress_tracker.get_remaining_files(files)
-    
-    if not remaining_files:
-        print("Alle Files bereits verarbeitet!")
-        return
-    
-    print(f"Verarbeite {len(remaining_files)} verbleibende Files von insgesamt {len(files)}")
-    
-    for i, file_path in enumerate(remaining_files):
-        print(f"\nVerarbeite File {i+1}/{len(remaining_files)}: {os.path.basename(file_path)}")
-        start_time = time.time()
-        
-        try:
-            # File verarbeiten
-            args = (file_path, voxel_tree, voxel_data, voxel_indices, 
-                   material_mapping_path, geometry_params, validation_set)  # [GEÄNDERT] - validation_set hinzugefügt
-            result = process_single_file(args)
-            
-            # [GEÄNDERT] Ergebnisse in beide HDF5-Dateien schreiben
-            entries_train = append_results_to_hdf5(
-                output_file_train, 
-                {'phi_data': result['phi_data_train'], 'target_data': result['target_data_train']},
-                voxel_indices, weight, 'train'
-            )
-            entries_val = append_results_to_hdf5(
-                output_file_val,
-                {'phi_data': result['phi_data_val'], 'target_data': result['target_data_val']},
-                voxel_indices, weight, 'val'
-            )
-            
-            # Fortschritt aktualisieren
-            progress_tracker.mark_file_completed(file_path, entries_train, entries_val, result['unassigned_count'])
-            
-            processing_time = time.time() - start_time
-            print(f"✓ File verarbeitet in {processing_time:.2f}s")
-            print(f"  Train: {entries_train} Einträge, Val: {entries_val} Einträge")
-            
-        except Exception as e:
-            error_msg = f"Fehler bei der Verarbeitung: {str(e)}"
-            print(f"✗ {error_msg}")
-            progress_tracker.mark_file_failed(file_path, error_msg)
-            continue
-        
-        # Zwischenstatistiken
-        if (i + 1) % 10 == 0:
-            stats = progress_tracker.get_statistics()
-            print(f"\nZwischenstand: {stats['completed']}/{len(files)} Files verarbeitet")
-            print(f"Laufzeit: {stats['elapsed_time']/60:.1f} min")
-            print(f"Einträge Train: {stats['total_entries_train']}, Val: {stats['total_entries_val']}") 
 
 def find_all_hdf5_files(input_path, nested):  # [NEU - GANZE FUNKTION]
     """Findet alle HDF5-Dateien entweder direkt oder in Unterordnern"""
@@ -1333,7 +978,10 @@ Beispiele:
     parser.add_argument('-m', '--material-mapping',
                         default='/global/cfs/projectdirs/legend/users/tbuerger/postprocessing/globalMaterialMappings.json',
                         help='Pfad zur Material-Mapping-Datei')
-    parser.add_argument('-v', '--voxel-file',
+    parser.add_argument('-v', '--volume-mapping',
+                        default='/global/cfs/projectdirs/legend/users/tbuerger/postprocessing/globalVolumeMappings.json',
+                        help='Pfad zur Volume-Mapping-Datei')
+    parser.add_argument('-x', '--voxel-file',
                         default='/global/cfs/projectdirs/legend/users/tbuerger/createSSD/currentDistZylVoxelsPMTSize.json',
                         help='Pfad zur Voxel-Datei')
     
@@ -1422,22 +1070,29 @@ def main():
     # Alle Materialien sammeln (nur bei Reset oder wenn noch keine Output-Datei existiert)
     if not os.path.exists(output_file_train):
         all_materials = collect_all_materials_first(files)
+        all_volumes = collect_all_volumes_first(files)
         
         # Vollständiges globales Mapping erstellen
         global_material_mapping = create_global_material_mapping(all_materials, args.material_mapping)
         print(f"Globales Material-Mapping erstellt mit {len(global_material_mapping)} Materialien")
+
+        global_volume_mapping = create_global_volume_mapping(all_volumes, args.volume_mapping)
+        print(f"Globales Volume-Mapping erstellt mit {len(global_volume_mapping)} Volumen")
     else:
         # Bestehendes Mapping laden
         global_material_mapping = loadMapping(args.material_mapping)
         print(f"Bestehendes Material-Mapping geladen: {len(global_material_mapping)} Materialien")
+
+        global_volume_mapping = loadMapping(args.volume_mapping)
+        print(f"Bestehendes Volume-Mapping geladen: {len(global_volume_mapping)} Volumen")
     
     # Gewichtung berechnen
     sample_size = args.sample_weight if args.sample_weight > 0 else None
     weight = calculate_weight_from_files(files, sample_size)
     
     # Output-Datei erstellen oder öffnen
-    output_file_train = create_or_open_output_file(args.output, 0, voxel_data, global_material_mapping, r_zylinder, "_train")
-    output_file_val = create_or_open_output_file(args.output, 0, voxel_data, global_material_mapping, r_zylinder, "_validation")
+    output_file_train = create_or_open_output_file(args.output, 0, voxel_data, global_material_mapping, global_volume_mapping, r_zylinder, "_train")
+    output_file_val = create_or_open_output_file(args.output, 0, voxel_data, global_material_mapping, global_volume_mapping, r_zylinder, "_validation")
     
     # Geometrie-Parameter für Worker
     geometry_params = {'h_zylinder': h_zylinder}
@@ -1459,7 +1114,7 @@ def main():
     try:
         process_files_sequentially(
             files, voxel_tree, voxel_data, voxel_indices,
-            args.material_mapping, geometry_params,
+            args.material_mapping, args.volume_mapping, geometry_params,
             output_file_train, output_file_val, weight, 
             progress_tracker, val_pairs  
         )
