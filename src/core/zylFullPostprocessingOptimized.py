@@ -282,6 +282,25 @@ def collect_all_volumes_first(files):
     print(f"Gefunden: {len(all_volumes)} einzigartige physikalische Volumes")
     return all_volumes
 
+def find_all_hdf5_files(input_path, nested):
+    """Findet alle HDF5-Dateien entweder direkt oder in Unterordnern"""
+    files = []
+    
+    if nested:
+        # Suche in Unterordnern
+        print(f"Suche nach Simulationsdaten in Unterordnern von {input_path}...")
+        subdirs = [d for d in Path(input_path).iterdir() if d.is_dir()]
+        for subdir in subdirs:
+            subdir_files = sorted(glob.glob(os.path.join(subdir, 'output_*.hdf5')))
+            if subdir_files:
+                print(f"  Gefunden: {len(subdir_files)} Files in {subdir.name}")
+                files.extend(subdir_files)
+    else:
+        # Suche direkt im angegebenen Ordner
+        files = sorted(glob.glob(os.path.join(input_path, 'output_*.hdf5')))
+    
+    return files
+
 def checkRadialMomentumVectorized(x, y, z, px, py, pz):
     """Vectorized radial momentum calculation"""
     r = np.sqrt(x**2 + y**2)
@@ -930,25 +949,6 @@ def create_or_open_output_file(output_path, file_index, voxel_indices, mat_map, 
     
     return output_file
 
-def find_all_hdf5_files(input_path, nested):  # [NEU - GANZE FUNKTION]
-    """Findet alle HDF5-Dateien entweder direkt oder in Unterordnern"""
-    files = []
-    
-    if nested:
-        # Suche in Unterordnern
-        print(f"Suche nach Simulationsdaten in Unterordnern von {input_path}...")
-        subdirs = [d for d in Path(input_path).iterdir() if d.is_dir()]
-        for subdir in subdirs:
-            subdir_files = sorted(glob.glob(os.path.join(subdir, 'output_*.hdf5')))
-            if subdir_files:
-                print(f"  Gefunden: {len(subdir_files)} Files in {subdir.name}")
-                files.extend(subdir_files)
-    else:
-        # Suche direkt im angegebenen Ordner
-        files = sorted(glob.glob(os.path.join(input_path, 'output_*.hdf5')))
-    
-    return files
-
 def parse_arguments():
     """Parst Kommandozeilen-Argumente"""
     parser = argparse.ArgumentParser(
@@ -992,6 +992,8 @@ Beispiele:
                         help='Verarbeitung von vorne beginnen (überschreibt bestehende Ergebnisse)')
     parser.add_argument('--sample-weight', type=int, default=50,
                         help='Anzahl Files für Gewichtungsberechnung (0 = alle Files verwenden)')
+    parser.add_argument('--nested', action='store_true',
+                        help='Suche nach HDF5-Dateien in Unterordnern (z.B. run_001, run_002, ...)')
     
     # Train/Val Split Parameter
     parser.add_argument('--val-fraction', type=float, default=0.2,
