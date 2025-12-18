@@ -976,13 +976,13 @@ Beispiele:
     
     # Optionale Argumente mit Defaults
     parser.add_argument('-m', '--material-mapping',
-                        default='/global/cfs/projectdirs/legend/users/tbuerger/postprocessing/globalMaterialMappings.json',
+                        default='/global/cfs/projectdirs/legend/users/tbuerger/postprocessing/src/mappings/globalMaterialMappings.json',
                         help='Pfad zur Material-Mapping-Datei')
     parser.add_argument('-v', '--volume-mapping',
-                        default='/global/cfs/projectdirs/legend/users/tbuerger/postprocessing/globalPhysVolMappings.json',
+                        default='/global/cfs/projectdirs/legend/users/tbuerger/postprocessing/src/mappings/globalPhysVolMappings.json',
                         help='Pfad zur Volume-Mapping-Datei')
     parser.add_argument('-x', '--voxel-file',
-                        default='/global/cfs/projectdirs/legend/users/tbuerger/createSSD/currentDistZylVoxelsPMTSize.json',
+                        default='/global/cfs/projectdirs/legend/users/tbuerger/createSSD/src/geometries/currentDistZylVoxelsPMTSize.json',
                         help='Pfad zur Voxel-Datei')
     
     # Resume und Processing-Optionen
