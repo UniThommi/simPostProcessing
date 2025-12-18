@@ -979,7 +979,7 @@ Beispiele:
                         default='/global/cfs/projectdirs/legend/users/tbuerger/postprocessing/globalMaterialMappings.json',
                         help='Pfad zur Material-Mapping-Datei')
     parser.add_argument('-v', '--volume-mapping',
-                        default='/global/cfs/projectdirs/legend/users/tbuerger/postprocessing/globalVolumeMappings.json',
+                        default='/global/cfs/projectdirs/legend/users/tbuerger/postprocessing/globalPhysVolMappings.json',
                         help='Pfad zur Volume-Mapping-Datei')
     parser.add_argument('-x', '--voxel-file',
                         default='/global/cfs/projectdirs/legend/users/tbuerger/createSSD/currentDistZylVoxelsPMTSize.json',
