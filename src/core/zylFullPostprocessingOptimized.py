@@ -982,7 +982,7 @@ Beispiele:
                         default='/global/cfs/projectdirs/legend/users/tbuerger/postprocessing/src/mappings/globalPhysVolMappings.json',
                         help='Pfad zur Volume-Mapping-Datei')
     parser.add_argument('-x', '--voxel-file',
-                        default='/global/cfs/projectdirs/legend/users/tbuerger/createSSD/src/geometries/currentDistZylVoxelsPMTSize.json',
+                        default='/global/cfs/projectdirs/legend/users/tbuerger/createSSD/src/voxels/currentDistZylVoxelsPMTSize.json',
                         help='Pfad zur Voxel-Datei')
     
     # Resume und Processing-Optionen
