@@ -15,6 +15,7 @@ import psutil
 import gc
 import argparse
 from pathlib import Path
+import shutil
 
 """
 Das Post-Processing beinhaltet mehrere Schritte:
@@ -83,6 +84,18 @@ class ProgressTracker:
                 json.dump(self.progress_data, f, indent=2)
         except IOError as e:
             print(f"Warnung: Konnte Fortschritt nicht speichern: {e}")
+
+    def log_processing_params(self, chunk_size, available_mem_gb):
+        """Loggt Verarbeitungsparameter ins Progress-File"""
+        if 'processing_params' not in self.progress_data:
+            self.progress_data['processing_params'] = []
+        
+        self.progress_data['processing_params'].append({
+            'timestamp': time.time(),
+            'chunk_size': chunk_size,
+            'available_mem_gb': round(available_mem_gb, 2)
+        })
+        self.save_progress()
     
     def is_file_completed(self, file_path):
         """Prüft ob eine Datei bereits verarbeitet wurde"""
@@ -97,6 +110,28 @@ class ProgressTracker:
             self.progress_data['total_entries_written_val'] += entries_count_val      
             self.progress_data['total_unassigned'] += unassigned_count
             self.save_progress()
+    
+    def create_checkpoint(self, output_file):
+        """Erstellt einen Checkpoint der aktuellen HDF5-Datei"""
+        checkpoint_file = str(output_file).replace('.hdf5', '_checkpoint.hdf5')
+        try:            
+            shutil.copy2(output_file, checkpoint_file)
+            print(f"  Checkpoint erstellt: {os.path.basename(checkpoint_file)}")
+        except Exception as e:
+            print(f"  Warnung: Konnte Checkpoint nicht erstellen: {e}")
+    
+    def verify_hdf5_integrity(self, output_file):
+        """Prüft ob HDF5-Datei lesbar ist"""
+        try:
+            with h5py.File(output_file, 'r') as f:
+                # Versuche auf kritische Datasets zuzugreifen
+                if 'phi' in f and 'xNC_mm' in f['phi']:
+                    _ = f['phi']['xNC_mm'].shape
+                    return True
+        except Exception as e:
+            print(f"  WARNUNG: HDF5-Integritätsprüfung fehlgeschlagen: {e}")
+            return False
+        return False
     
     def mark_file_failed(self, file_path, error_msg):
         """Markiert eine Datei als fehlgeschlagen"""
@@ -393,8 +428,6 @@ def process_single_file(args):
         CHUNK_SIZE = 10000
     else:
         CHUNK_SIZE = 5000
-    
-    # print(f"Verwende CHUNK_SIZE: {CHUNK_SIZE} (verfügbar: {available_mem_gb:.1f}GB)")
 
     with h5py.File(file_path, 'r') as f:
         # Neutron Capture Output Daten lesen
@@ -643,10 +676,10 @@ def append_results_to_hdf5(output_file, result_data, voxel_indices, weight, data
                 existing_data = phi_grp[col_name][:]
                 new_data = np.concatenate([existing_data, phi_data[:, i]])
                 del phi_grp[col_name]
-                phi_grp.create_dataset(col_name, data=new_data)
+                phi_grp.create_dataset(col_name, data=new_data, compression='gzip', compression_opts=1)
             else:
                 # Neues Dataset erstellen
-                phi_grp.create_dataset(col_name, data=phi_data[:, i])
+                phi_grp.create_dataset(col_name, data=phi_data[:, i], compression='gzip', compression_opts=1)
         
         # Für target data: entweder erweitern oder neu erstellen
         for i, voxel_idx in enumerate(voxel_indices):
@@ -656,19 +689,22 @@ def append_results_to_hdf5(output_file, result_data, voxel_indices, weight, data
                 existing_data = target_grp[voxel_str][:]
                 new_data = np.concatenate([existing_data, target_data[:, i]])
                 del target_grp[voxel_str]
-                target_grp.create_dataset(voxel_str, data=new_data)
+                target_grp.create_dataset(voxel_str, data=new_data, compression='gzip', compression_opts=1)
             else:
                 # Neues Dataset erstellen
-                target_grp.create_dataset(voxel_str, data=target_data[:, i])
+                target_grp.create_dataset(voxel_str, data=target_data[:, i], compression='gzip', compression_opts=1)
         
         # Weights erweitern oder neu erstellen
         if "weights" in out:
             existing_weights = out["weights"][:]
             new_weights = np.concatenate([existing_weights, weights])
             del out["weights"]
-            out.create_dataset("weights", data=new_weights)
+            out.create_dataset("weights", data=new_weights, compression='gzip', compression_opts=1)
         else:
-            out.create_dataset("weights", data=weights)
+            out.create_dataset("weights", data=weights, compression='gzip', compression_opts=1)
+        
+        out.flush()
+    gc.collect()
     
     return num_entries
 
@@ -761,6 +797,11 @@ def process_files_sequentially(files, voxel_tree, voxel_data, voxel_indices,
             args = (file_path, voxel_tree, voxel_data, voxel_indices, 
                    material_mapping_path, volume_mapping_path, geometry_params, validation_set)  # [GEÄNDERT] - validation_set hinzugefügt
             result = process_single_file(args)
+
+            # Log processing params
+            available_mem_gb = psutil.virtual_memory().available / (1024**3)
+            chunk_size_used = 20000 if available_mem_gb > 50 else (15000 if available_mem_gb > 30 else (10000 if available_mem_gb > 20 else 5000))
+            progress_tracker.log_processing_params(chunk_size_used, available_mem_gb)
             
             # [GEÄNDERT] Ergebnisse in beide HDF5-Dateien schreiben
             entries_train = append_results_to_hdf5(
@@ -779,7 +820,14 @@ def process_files_sequentially(files, voxel_tree, voxel_data, voxel_indices,
             
             processing_time = time.time() - start_time
             print(f"✓ File verarbeitet in {processing_time:.2f}s")
-            print(f"  Train: {entries_train} Einträge, Val: {entries_val} Einträge")  # [GEÄNDERT] - beide anzeigen
+            print(f"  Train: {entries_train} Einträge, Val: {entries_val} Einträge")
+
+            if (i + 1) % 100 == 0:
+                print(f"\n=== Checkpoint bei File {i+1} ===")
+                if not progress_tracker.verify_hdf5_integrity(output_file_val):
+                    raise RuntimeError(f"Validation-File korrupt erkannt bei File {i+1}! Stoppe Verarbeitung.")
+                progress_tracker.create_checkpoint(output_file_val)
+                progress_tracker.create_checkpoint(output_file_train)
             
         except Exception as e:
             error_msg = f"Fehler bei der Verarbeitung: {str(e)}"
@@ -794,97 +842,92 @@ def process_files_sequentially(files, voxel_tree, voxel_data, voxel_indices,
             print(f"Laufzeit: {stats['elapsed_time']/60:.1f} min")
             print(f"Einträge Train: {stats['total_entries_train']}, Val: {stats['total_entries_val']}")  # [GEÄNDERT]
             
-class ProgressTracker:
-    """Klasse zum Verwalten des Verarbeitungsfortschritts"""
+def process_files_in_batches(files, voxel_tree, voxel_data, voxel_indices, 
+                             material_mapping_path, volume_mapping_path,
+                             geometry_params, output_file_train, output_file_val, 
+                             weight, progress_tracker, validation_set, batch_size=10):
+    """Verarbeitet Files in Batches und schreibt akkumuliert"""
     
-    def __init__(self, output_dir, output_file_train, output_file_val):  # [GEÄNDERT] - 2 output files statt 1
-        self.output_dir = Path(output_dir)
-        self.output_file_train = Path(output_file_train)  # [NEU]
-        self.output_file_val = Path(output_file_val)      # [NEU]
-        self.progress_file = self.output_dir / "processing_progress.json"
-        self.lock_file = self.output_dir / "processing.lock"
-        self.progress_data = self.load_progress()
+    remaining_files = progress_tracker.get_remaining_files(files)
     
-    def load_progress(self):
-        """Lädt bestehenden Fortschritt oder erstellt neuen"""
-        if self.progress_file.exists():
-            try:
-                with open(self.progress_file, 'r') as f:
-                    data = json.load(f)
-                print(f"Bestehender Fortschritt gefunden: {len(data.get('completed_files', []))} Files bereits verarbeitet")
-                return data
-            except (json.JSONDecodeError, IOError) as e:
-                print(f"Warnung: Konnte Fortschritt nicht laden ({e}), starte neu")
+    if not remaining_files:
+        print("Alle Files bereits verarbeitet!")
+        return
+    
+    print(f"Verarbeite {len(remaining_files)} Files in Batches von {batch_size}")
+    
+    for batch_start in range(0, len(remaining_files), batch_size):
+        batch_end = min(batch_start + batch_size, len(remaining_files))
+        batch_files = remaining_files[batch_start:batch_end]
         
-        return {
-            'completed_files': [],
-            'failed_files': [],
-            'start_time': time.time(),
-            'last_update': time.time(),
-            'total_entries_written_train': 0,   # [GEÄNDERT] - war total_entries_written
-            'total_entries_written_val': 0,     # [NEU]
-            'total_unassigned': 0,
-            'output_file_train': str(self.output_file_train),  # [GEÄNDERT] - war output_file
-            'output_file_val': str(self.output_file_val)       # [NEU]
-        }
-    
-    def save_progress(self):
-        """Speichert aktuellen Fortschritt"""
-        self.progress_data['last_update'] = time.time()
-        try:
-            with open(self.progress_file, 'w') as f:
-                json.dump(self.progress_data, f, indent=2)
-        except IOError as e:
-            print(f"Warnung: Konnte Fortschritt nicht speichern: {e}")
-    
-    def is_file_completed(self, file_path):
-        """Prüft ob eine Datei bereits verarbeitet wurde"""
-        return str(file_path) in self.progress_data['completed_files']
-    
-    def mark_file_completed(self, file_path, entries_count_train, entries_count_val, unassigned_count):  # [GEÄNDERT] - 2 counts statt 1
-        """Markiert eine Datei als erfolgreich verarbeitet"""
-        file_str = str(file_path)
-        if file_str not in self.progress_data['completed_files']:
-            self.progress_data['completed_files'].append(file_str)
-            self.progress_data['total_entries_written_train'] += entries_count_train  # [GEÄNDERT]
-            self.progress_data['total_entries_written_val'] += entries_count_val      # [NEU]
-            self.progress_data['total_unassigned'] += unassigned_count
-            self.save_progress()
-    
-    def mark_file_failed(self, file_path, error_msg):
-        """Markiert eine Datei als fehlgeschlagen"""
-        self.progress_data['failed_files'].append({
-            'file': str(file_path),
-            'error': str(error_msg),
-            'timestamp': time.time()
-        })
-        self.save_progress()
-    
-    def get_remaining_files(self, all_files):
-        """Gibt Liste der noch zu verarbeitenden Dateien zurück"""
-        completed = set(self.progress_data['completed_files'])
-        return [f for f in all_files if str(f) not in completed]
-    
-    def get_statistics(self):
-        """Gibt Statistiken zurück"""
-        return {
-            'completed': len(self.progress_data['completed_files']),
-            'failed': len(self.progress_data['failed_files']),
-            'total_entries_train': self.progress_data['total_entries_written_train'],  # [GEÄNDERT]
-            'total_entries_val': self.progress_data['total_entries_written_val'],      # [NEU]
-            'total_unassigned': self.progress_data['total_unassigned'],
-            'elapsed_time': time.time() - self.progress_data['start_time']
-        }
-    
-    def cleanup(self):
-        """Räumt temporäre Dateien auf (nach erfolgreichem Abschluss)"""
-        try:
-            if self.progress_file.exists():
-                self.progress_file.unlink()
-            if self.lock_file.exists():
-                self.lock_file.unlink()
-        except OSError:
-            pass
+        print(f"\n=== Batch {batch_start//batch_size + 1}: Files {batch_start+1}-{batch_end} ===")
+        
+        # Akkumulatoren für Batch
+        batch_phi_train = []
+        batch_target_train = []
+        batch_phi_val = []
+        batch_target_val = []
+        total_unassigned = 0
+        
+        for file_path in batch_files:
+            try:
+                args = (file_path, voxel_tree, voxel_data, voxel_indices,
+                       material_mapping_path, volume_mapping_path,
+                       geometry_params, validation_set)
+                result = process_single_file(args)
+                
+                if len(result['phi_data_train']) > 0:
+                    batch_phi_train.append(result['phi_data_train'])
+                    batch_target_train.append(result['target_data_train'])
+                
+                if len(result['phi_data_val']) > 0:
+                    batch_phi_val.append(result['phi_data_val'])
+                    batch_target_val.append(result['target_data_val'])
+                
+                total_unassigned += result['unassigned_count']
+                
+                print(f"  ✓ {os.path.basename(file_path)}")
+                
+            except Exception as e:
+                print(f"  ✗ {os.path.basename(file_path)}: {e}")
+                progress_tracker.mark_file_failed(file_path, str(e))
+                continue
+        
+        # Batch-Write
+        if batch_phi_train:
+            combined_phi_train = np.vstack(batch_phi_train)
+            combined_target_train = np.vstack(batch_target_train)
+            entries_train = append_results_to_hdf5(
+                output_file_train,
+                {'phi_data': combined_phi_train, 'target_data': combined_target_train},
+                voxel_indices, weight, 'train'
+            )
+            print(f"  Batch Train geschrieben: {entries_train} Einträge")
+        
+        if batch_phi_val:
+            combined_phi_val = np.vstack(batch_phi_val)
+            combined_target_val = np.vstack(batch_target_val)
+            entries_val = append_results_to_hdf5(
+                output_file_val,
+                {'phi_data': combined_phi_val, 'target_data': combined_target_val},
+                voxel_indices, weight, 'val'
+            )
+            print(f"  Batch Val geschrieben: {entries_val} Einträge")
+        
+        # Markiere alle Files im Batch als completed
+        for file_path in batch_files:
+            if str(file_path) not in [f['file'] for f in progress_tracker.progress_data['failed_files']]:
+                progress_tracker.mark_file_completed(file_path, 
+                                                     len(combined_phi_train) if batch_phi_train else 0,
+                                                     len(combined_phi_val) if batch_phi_val else 0,
+                                                     total_unassigned)
+        
+        # Checkpoint nach jedem Batch
+        progress_tracker.verify_hdf5_integrity(output_file_val)
+        
+        # Speicher freigeben
+        del batch_phi_train, batch_target_train, batch_phi_val, batch_target_val
+        gc.collect()
 
 
 # ----------------------------------------------------------------------------
@@ -1114,11 +1157,18 @@ def main():
     start_time = time.time()
     
     try:
-        process_files_sequentially(
+        # process_files_sequentially(
+        #     files, voxel_tree, voxel_data, voxel_indices,
+        #     args.material_mapping, args.volume_mapping, geometry_params,
+        #     output_file_train, output_file_val, weight, 
+        #     progress_tracker, val_pairs  
+        # )
+
+        process_files_in_batches(
             files, voxel_tree, voxel_data, voxel_indices,
-            args.material_mapping, args.volume_mapping, geometry_params,
-            output_file_train, output_file_val, weight, 
-            progress_tracker, val_pairs  
+            args.material_mapping, args.volume_mapping,
+            geometry_params, output_file_train, output_file_val, 
+            weight, progress_tracker, val_pairs, batch_size=10
         )
     except KeyboardInterrupt:
         print(f"\nVerarbeitung durch Benutzer unterbrochen.")

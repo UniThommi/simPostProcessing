@@ -4,5 +4,12 @@
   "metal_steel": 3,
   "LiquidArgon": 4,
   "tyvek": 5,
-  "metal_copper": 6
+  "metal_copper": 6,
+  "EnrichedGermanium0.913": 7,
+  "my_tyvek": 8,
+  "pmma_cl2": 9,
+  "ultem": 10,
+  "pmma": 11,
+  "ps_fibers": 12,
+  "pen": 13
 }
