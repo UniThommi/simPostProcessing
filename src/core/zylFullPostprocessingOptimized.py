@@ -224,11 +224,14 @@ def remapVolumeIDsToGlobal(
     # Build mapping dictionary for unique IDs
     for local_id in unique_local_ids:
         local_name = local_vol_map[local_id]
-        if local_name in globVolumeMapping:
-            mapping_dict[local_id] = globVolumeMapping[local_name]
+        # Sanitize empty string BEFORE lookup
+        local_name_clean = "noVolume" if local_name == "" else local_name
+
+        if local_name_clean in globVolumeMapping:
+            mapping_dict[local_id] = globVolumeMapping[local_name_clean]
         else:
             max_global_id += 1
-            globVolumeMapping[local_name] = max_global_id
+            globVolumeMapping[local_name_clean] = max_global_id
             mapping_dict[local_id] = max_global_id
 
     # Vectorize the mapping process
@@ -301,7 +304,9 @@ def collect_all_materials_first(files):
     return all_materials
 
 def collect_all_volumes_first(files):
-    """Sammelt alle physikalischen Volumes aus allen Files VOR der parallelen Verarbeitung"""
+    """
+    Sammelt alle physikalischen Volumes aus allen Files mit Sanitization.
+    """
     print("Sammle alle physikalischen Volumes aus allen Files...")
     all_volumes = set()
     
@@ -309,12 +314,26 @@ def collect_all_volumes_first(files):
         try:
             with h5py.File(file_path, 'r') as f:
                 volume_names = [x.decode() for x in f["hit/physVolumes/physVolumeNames"]["pages"][:]]
-                all_volumes.update(volume_names)
+                
+                # Sanitize empty strings immediately
+                volume_names_clean = [
+                    "noVolume" if name == "" else name 
+                    for name in volume_names
+                ]
+                
+                all_volumes.update(volume_names_clean)
         except Exception as e:
             print(f"Fehler beim Lesen von {file_path}: {e}")
             continue
     
     print(f"Gefunden: {len(all_volumes)} einzigartige physikalische Volumes")
+    
+    # Verify no empty strings remain
+    if "" in all_volumes:
+        print(f"  ⚠ WARNING: Empty string still present after sanitization!")
+        all_volumes.remove("")
+        all_volumes.add("noVolume")
+    
     return all_volumes
 
 def find_all_hdf5_files(input_path, nested):
@@ -681,18 +700,26 @@ def append_results_to_hdf5(output_file, result_data, voxel_indices, weight, data
                 # Neues Dataset erstellen
                 phi_grp.create_dataset(col_name, data=phi_data[:, i], compression='gzip', compression_opts=1)
         
-        # Für target data: entweder erweitern oder neu erstellen
+        # Für target data: FIXED - Use resize for efficiency
         for i, voxel_idx in enumerate(voxel_indices):
             voxel_str = str(voxel_idx)
-            if voxel_str in target_grp:
-                # Dataset existiert, erweitern
-                existing_data = target_grp[voxel_str][:]
-                new_data = np.concatenate([existing_data, target_data[:, i]])
-                del target_grp[voxel_str]
-                target_grp.create_dataset(voxel_str, data=new_data, compression='gzip', compression_opts=1)
-            else:
-                # Neues Dataset erstellen
-                target_grp.create_dataset(voxel_str, data=target_data[:, i], compression='gzip', compression_opts=1)
+            
+            # Validierung: Dataset MUSS existieren (nach Fix in create_or_open_output_file)
+            if voxel_str not in target_grp:
+                raise RuntimeError(
+                    f"CRITICAL ERROR: Target dataset '{voxel_str}' does not exist!\n"
+                    f"This should never happen after create_or_open_output_file() fix.\n"
+                    f"File may be corrupted: {output_file}"
+                )
+            
+            # Erweitere existierendes Dataset effizient mit resize()
+            dset = target_grp[voxel_str]
+            old_size = dset.shape[0]
+            new_size = old_size + num_entries
+            
+            # Resize and write new data
+            dset.resize((new_size,))
+            dset[old_size:new_size] = target_data[:, i]
         
         # Weights erweitern oder neu erstellen
         if "weights" in out:
@@ -973,13 +1000,19 @@ def create_or_open_output_file(output_path, file_index, voxel_indices, mat_map, 
         # Volume mapping
         for key, value in vol_map.items():
             if key == "":
-                key = "no_volume"
-            vol_map_grp.create_dataset(str(key), data=int(value))
+                key_clean = "noVolume"
+            else:
+                key_clean = key
+            vol_map_grp.create_dataset(str(key_clean), data=int(value))
         
-        # Voxel data schreiben
+        # Voxel data UND Target datasets gleichzeitig initialisieren
+        print(f"  Initialisiere {len(voxel_indices)} Voxel mit Target-Datasets...")        
         for voxel in voxel_indices:  # voxel_indices ist hier voxel_data
             if isinstance(voxel, dict):
-                voxel_grp = voxels_grp.create_group(str(voxel['index']))
+                voxel_idx = voxel['index']
+                
+                # Voxel metadata in /voxels/<voxel_id>/
+                voxel_grp = voxels_grp.create_group(str(voxel_idx))
                 voxel_grp.create_dataset("center", data=np.array(voxel['center'], dtype='f'))
                 dt = h5py.string_dtype(encoding='utf-8')
                 voxel_grp.create_dataset("layer", data=voxel['layer'], dtype=dt)
@@ -989,6 +1022,19 @@ def create_or_open_output_file(output_path, file_index, voxel_indices, mat_map, 
                 corners_grp.create_dataset("x", data=corners[:, 0])
                 corners_grp.create_dataset("y", data=corners[:, 1])
                 corners_grp.create_dataset("z", data=corners[:, 2])
+                
+                # CRITICAL FIX: Create EMPTY resizable target dataset
+                target_grp.create_dataset(
+                    str(voxel_idx),
+                    shape=(0,),              # Start with 0 entries
+                    maxshape=(None,),        # Allow unlimited growth
+                    dtype=np.int32,
+                    chunks=True,             # Required for resize
+                    compression='gzip',
+                    compression_opts=1
+                )
+        
+        print(f"  ✓ Alle {len(voxel_indices)} Voxel-Datasets erstellt")
     
     return output_file
 
