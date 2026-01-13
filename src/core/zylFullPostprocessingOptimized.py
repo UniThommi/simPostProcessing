@@ -710,7 +710,7 @@ def process_single_file(args):
     processed_events = len(phi_data_train) + len(phi_data_val)
     print(f"  NC-Events: {total_nc_events} total, {processed_events} verarbeitet")
     if orphaned_photons > 0:
-    print(f"  ⚠ WARNUNG: {orphaned_photons} Photonen ohne zugehöriges NC-Event verworfen")
+        print(f"  ⚠ WARNUNG: {orphaned_photons} Photonen ohne zugehöriges NC-Event verworfen")
 
     assert total_nc_events == processed_events, (
         f"Nicht alle NC-Events wurden verarbeitet! "
