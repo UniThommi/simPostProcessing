@@ -52,6 +52,7 @@ class ProgressTracker:
         self.output_file_val = Path(output_file_val)      # [NEU]
         self.progress_file = self.output_dir / "processing_progress.json"
         self.lock_file = self.output_dir / "processing.lock"
+        self.split_file = self.output_dir / "train_val_split.json"
         self.progress_data = self.load_progress()
     
     def load_progress(self):
@@ -77,6 +78,73 @@ class ProgressTracker:
             'output_file_val': str(self.output_file_val)      
         }
     
+    def save_train_val_split(self, train_pairs, val_pairs, random_seed, val_fraction):
+        """
+        Speichert Train/Val Split für Reproduzierbarkeit.
+        
+        Args:
+            train_pairs: Set von (evtid, nC_id) Tupeln für Training
+            val_pairs: Set von (evtid, nC_id) Tupeln für Validation
+            random_seed: Verwendeter Random Seed
+            val_fraction: Validation-Anteil
+        """
+        split_data = {
+            'random_seed': random_seed,
+            'val_fraction': val_fraction,
+            'train_pairs': [list(pair) for pair in train_pairs],  # Set → List für JSON
+            'val_pairs': [list(pair) for pair in val_pairs],
+            'created_at': time.time()
+        }
+        
+        try:
+            with open(self.split_file, 'w') as f:
+                json.dump(split_data, f, indent=2)
+            print(f"Train/Val Split gespeichert in {self.split_file}")
+        except IOError as e:
+            print(f"Warnung: Konnte Split nicht speichern: {e}")
+    
+    def load_train_val_split(self):
+        """
+        Lädt gespeicherten Train/Val Split.
+        
+        Returns:
+            tuple: (train_pairs, val_pairs, random_seed, val_fraction) oder None
+        """
+        if not self.split_file.exists():
+            return None
+        
+        try:
+            with open(self.split_file, 'r') as f:
+                split_data = json.load(f)
+            
+            train_pairs = set(tuple(pair) for pair in split_data['train_pairs'])
+            val_pairs = set(tuple(pair) for pair in split_data['val_pairs'])
+            
+            print(f"Train/Val Split geladen:")
+            print(f"  Training: {len(train_pairs)} NC-Events")
+            print(f"  Validation: {len(val_pairs)} NC-Events")
+            print(f"  Random Seed: {split_data['random_seed']}")
+            print(f"  Val Fraction: {split_data['val_fraction']}")
+            
+            return (train_pairs, val_pairs, 
+                   split_data['random_seed'], 
+                   split_data['val_fraction'])
+        
+        except (json.JSONDecodeError, IOError, KeyError) as e:
+            print(f"Warnung: Konnte Split nicht laden ({e}), erstelle neuen")
+            return None
+    
+    def cleanup(self):
+        """Räumt temporäre Dateien auf (nach erfolgreichem Abschluss)"""
+        try:
+            if self.progress_file.exists():
+                self.progress_file.unlink()
+            if self.lock_file.exists():
+                self.lock_file.unlink()
+            # Split-Datei NICHT löschen - könnte für Reproduzierbarkeit benötigt werden
+        except OSError:
+            pass
+
     def save_progress(self):
         """Speichert aktuellen Fortschritt"""
         self.progress_data['last_update'] = time.time()
@@ -97,35 +165,34 @@ class ProgressTracker:
             'available_mem_gb': round(available_mem_gb, 2)
         })
         self.save_progress()
-    
+
     def is_file_completed(self, file_path):
         """Prüft ob eine Datei bereits verarbeitet wurde"""
         return str(file_path) in self.progress_data['completed_files']
-    
+
     def mark_file_completed(self, file_path, entries_count_train, entries_count_val, unassigned_count):
         """Markiert eine Datei als erfolgreich verarbeitet"""
         file_str = str(file_path)
         if file_str not in self.progress_data['completed_files']:
             self.progress_data['completed_files'].append(file_str)
-            self.progress_data['total_entries_written_train'] += entries_count_train 
-            self.progress_data['total_entries_written_val'] += entries_count_val      
+            self.progress_data['total_entries_written_train'] += entries_count_train
+            self.progress_data['total_entries_written_val'] += entries_count_val
             self.progress_data['total_unassigned'] += unassigned_count
             self.save_progress()
-    
+
     def create_checkpoint(self, output_file):
         """Erstellt einen Checkpoint der aktuellen HDF5-Datei"""
         checkpoint_file = str(output_file).replace('.hdf5', '_checkpoint.hdf5')
-        try:            
+        try:
             shutil.copy2(output_file, checkpoint_file)
             print(f"  Checkpoint erstellt: {os.path.basename(checkpoint_file)}")
         except Exception as e:
             print(f"  Warnung: Konnte Checkpoint nicht erstellen: {e}")
-    
+
     def verify_hdf5_integrity(self, output_file):
         """Prüft ob HDF5-Datei lesbar ist"""
         try:
             with h5py.File(output_file, 'r') as f:
-                # Versuche auf kritische Datasets zuzugreifen
                 if 'phi' in f and 'xNC_mm' in f['phi']:
                     _ = f['phi']['xNC_mm'].shape
                     return True
@@ -133,7 +200,7 @@ class ProgressTracker:
             print(f"  WARNUNG: HDF5-Integritätsprüfung fehlgeschlagen: {e}")
             return False
         return False
-    
+
     def mark_file_failed(self, file_path, error_msg):
         """Markiert eine Datei als fehlgeschlagen"""
         self.progress_data['failed_files'].append({
@@ -142,32 +209,22 @@ class ProgressTracker:
             'timestamp': time.time()
         })
         self.save_progress()
-    
+
     def get_remaining_files(self, all_files):
         """Gibt Liste der noch zu verarbeitenden Dateien zurück"""
         completed = set(self.progress_data['completed_files'])
         return [f for f in all_files if str(f) not in completed]
-    
+
     def get_statistics(self):
         """Gibt Statistiken zurück"""
         return {
             'completed': len(self.progress_data['completed_files']),
             'failed': len(self.progress_data['failed_files']),
-            'total_entries_train': self.progress_data['total_entries_written_train'], 
+            'total_entries_train': self.progress_data['total_entries_written_train'],
             'total_entries_val': self.progress_data['total_entries_written_val'],
             'total_unassigned': self.progress_data['total_unassigned'],
             'elapsed_time': time.time() - self.progress_data['start_time']
         }
-    
-    def cleanup(self):
-        """Räumt temporäre Dateien auf (nach erfolgreichem Abschluss)"""
-        try:
-            if self.progress_file.exists():
-                self.progress_file.unlink()
-            if self.lock_file.exists():
-                self.lock_file.unlink()
-        except OSError:
-            pass
 
 def loadMapping(filePath):
     with open(filePath, 'r') as f:
@@ -525,7 +582,8 @@ def process_single_file(args):
 
         # NEW: Initialisiere Voxel-Counter für alle NC-Events
         nc_voxel_counters = {key: Counter() for key in nc_data_dict.keys()}
-        
+        orphaned_photons = 0
+
         for chunk_idx in range(num_chunks):
             chunk_start = chunk_idx * CHUNK_SIZE
             chunk_end = min(chunk_start + CHUNK_SIZE, total_optical_events)
@@ -585,7 +643,7 @@ def process_single_file(args):
             
             # print_memory_usage(f"Chunk {chunk_idx + 1} Nach Filterung")
             
-        # Gruppierung der Photonen nach (evtid, nC_id)
+            # Gruppierung der Photonen nach (evtid, nC_id)
             photon_groups = defaultdict(list)
             for idx in range(len(photon_evtid_filtered)):
                 photon_groups[(photon_evtid_filtered[idx], photon_nC_id_filtered[idx])].append(idx)
@@ -593,6 +651,7 @@ def process_single_file(args):
             # CHANGED: Akkumuliere nur Voxel-Hits für NC-Events in diesem Chunk
             for (e_id, nc_id), photon_indices in photon_groups.items():
                 if (e_id, nc_id) not in nc_data_dict:
+                    orphaned_photons += len(photon_indices)
                     continue
                 
                 nc_info = nc_data_dict[(e_id, nc_id)]
@@ -609,7 +668,6 @@ def process_single_file(args):
             del x_filtered, y_filtered, z_filtered
             del photon_evtid_filtered, photon_nC_id_filtered, photon_gamma_energies_filtered
             del photon_groups
-            gc.collect()
             
             # print_memory_usage(f"Chunk {chunk_idx + 1} Ende")
     
@@ -651,6 +709,8 @@ def process_single_file(args):
     total_nc_events = len(nc_data_dict)
     processed_events = len(phi_data_train) + len(phi_data_val)
     print(f"  NC-Events: {total_nc_events} total, {processed_events} verarbeitet")
+    if orphaned_photons > 0:
+    print(f"  ⚠ WARNUNG: {orphaned_photons} Photonen ohne zugehöriges NC-Event verworfen")
 
     assert total_nc_events == processed_events, (
         f"Nicht alle NC-Events wurden verarbeitet! "
@@ -663,6 +723,7 @@ def process_single_file(args):
         'phi_data_val': np.array(phi_data_val, dtype=np.float32) if phi_data_val else np.array([]),      
         'target_data_val': np.array(target_data_val, dtype=np.int32) if target_data_val else np.array([]),
         'unassigned_count': unassigned_count,
+        'orphaned_photons': orphaned_photons,
         'file_processed': os.path.basename(file_path)
     }
     
@@ -695,13 +756,23 @@ def append_results_to_hdf5(output_file, result_data, voxel_indices, weight, data
         for i, col_name in enumerate(phi_columns):
             if col_name in phi_grp:
                 # Dataset existiert, erweitern
-                existing_data = phi_grp[col_name][:]
-                new_data = np.concatenate([existing_data, phi_data[:, i]])
-                del phi_grp[col_name]
-                phi_grp.create_dataset(col_name, data=new_data, compression='gzip', compression_opts=1)
+                dset = phi_grp[col_name]
+                old_size = dset.shape[0]
+                new_size = old_size + num_entries
+                
+                # Resize und neue Daten schreiben
+                dset.resize((new_size,))
+                dset[old_size:new_size] = phi_data[:, i]
             else:
                 # Neues Dataset erstellen
-                phi_grp.create_dataset(col_name, data=phi_data[:, i], compression='gzip', compression_opts=1)
+                phi_grp.create_dataset(
+                col_name, 
+                data=phi_data[:, i], 
+                maxshape=(None,),  # ← HINZUFÜGEN!
+                compression='gzip', 
+                compression_opts=1,
+                chunks=True
+            )
         
         # Für target data: FIXED - Use resize for efficiency
         for i, voxel_idx in enumerate(voxel_indices):
@@ -726,15 +797,21 @@ def append_results_to_hdf5(output_file, result_data, voxel_indices, weight, data
         
         # Weights erweitern oder neu erstellen
         if "weights" in out:
-            existing_weights = out["weights"][:]
-            new_weights = np.concatenate([existing_weights, weights])
-            del out["weights"]
-            out.create_dataset("weights", data=new_weights, compression='gzip', compression_opts=1)
+            dset = out["weights"]
+            old_size = dset.shape[0]
+            new_size = old_size + num_entries
+            dset.resize((new_size,))
+            dset[old_size:new_size] = weights
         else:
-            out.create_dataset("weights", data=weights, compression='gzip', compression_opts=1)
-        
+            out.create_dataset(
+                "weights", 
+                data=weights, 
+                maxshape=(None,),
+                compression='gzip', 
+                compression_opts=1,
+                chunks=True
+            )
         out.flush()
-    gc.collect()
     
     return num_entries
 
@@ -788,21 +865,67 @@ def calculate_weight_from_files(files, sample_size=None):
     
     return weight
 
-def create_train_val_split(all_nc_pairs, val_fraction=0.2, random_seed=42): 
-    """Erstellt zufälliges Train/Val Split der NC-Events"""
-    np.random.seed(random_seed)
-    all_pairs_list = list(all_nc_pairs)
-    np.random.shuffle(all_pairs_list)
-    
-    split_idx = int(len(all_pairs_list) * (1 - val_fraction))
-    train_pairs = set(all_pairs_list[:split_idx])
-    val_pairs = set(all_pairs_list[split_idx:])
-    
-    print(f"Train/Val Split erstellt:")
-    print(f"  Training: {len(train_pairs)} NC-Events ({(1-val_fraction)*100:.0f}%)")
-    print(f"  Validation: {len(val_pairs)} NC-Events ({val_fraction*100:.0f}%)")
-    
-    return train_pairs, val_pairs
+def create_or_load_train_val_split(progress_tracker, all_nc_pairs, 
+                                   val_fraction, random_seed):
+        """
+        Erstellt oder lädt Train/Val Split mit Reproduzierbarkeit.
+        
+        FIXED: Verwendet gespeicherten Split falls vorhanden
+        """
+        # Versuche bestehenden Split zu laden
+        loaded_split = progress_tracker.load_train_val_split()
+        
+        if loaded_split is not None:
+            train_pairs, val_pairs, saved_seed, saved_fraction = loaded_split
+            
+            # Warne wenn Parameter nicht übereinstimmen
+            if saved_seed != random_seed:
+                print(f"⚠ WARNUNG: Gespeicherter Random Seed ({saved_seed}) != aktueller Seed ({random_seed})")
+                print(f"  Verwende gespeicherten Split für Konsistenz!")
+            
+            if abs(saved_fraction - val_fraction) > 0.001:
+                print(f"⚠ WARNUNG: Gespeicherte Val-Fraction ({saved_fraction}) != aktuelle ({val_fraction})")
+                print(f"  Verwende gespeicherten Split für Konsistenz!")
+            
+            # Validierung: Prüfe ob alle Paare noch existieren
+            all_pairs_set = set(all_nc_pairs)
+            missing_train = train_pairs - all_pairs_set
+            missing_val = val_pairs - all_pairs_set
+            
+            if missing_train or missing_val:
+                print(f"⚠ WARNUNG: {len(missing_train) + len(missing_val)} NC-Events aus Split fehlen in Daten!")
+                print(f"  Erstelle neuen Split...")
+                loaded_split = None
+            else:
+                return val_pairs  # Nur val_pairs wird im Code verwendet
+        
+        # Erstelle neuen Split
+        if loaded_split is None:
+            print(f"Erstelle neuen Train/Val Split mit Seed {random_seed}...")
+            
+            # Konvertiere Set → sortierte Liste für Determinismus
+            all_pairs_list = sorted(list(all_nc_pairs))  # WICHTIG: sortieren!
+            
+            np.random.seed(random_seed)
+            indices = np.arange(len(all_pairs_list))
+            np.random.shuffle(indices)
+            
+            split_idx = int(len(all_pairs_list) * (1 - val_fraction))
+            train_indices = indices[:split_idx]
+            val_indices = indices[split_idx:]
+            
+            train_pairs = set(all_pairs_list[i] for i in train_indices)
+            val_pairs = set(all_pairs_list[i] for i in val_indices)
+            
+            print(f"Train/Val Split erstellt:")
+            print(f"  Training: {len(train_pairs)} NC-Events ({(1-val_fraction)*100:.0f}%)")
+            print(f"  Validation: {len(val_pairs)} NC-Events ({val_fraction*100:.0f}%)")
+            
+            # Speichere Split
+            progress_tracker.save_train_val_split(train_pairs, val_pairs, 
+                                                random_seed, val_fraction)
+            
+            return val_pairs
 
 def process_files_sequentially(files, voxel_tree, voxel_data, voxel_indices, 
                              material_mapping_path, volume_mapping_path, geometry_params, 
@@ -897,7 +1020,7 @@ def process_files_in_batches(files, voxel_tree, voxel_data, voxel_indices,
         batch_target_train = []
         batch_phi_val = []
         batch_target_val = []
-        total_unassigned = 0
+        file_stats = {}
         
         for file_path in batch_files:
             try:
@@ -906,18 +1029,26 @@ def process_files_in_batches(files, voxel_tree, voxel_data, voxel_indices,
                        geometry_params, validation_set)
                 result = process_single_file(args)
                 
-                if len(result['phi_data_train']) > 0:
+                # Tracke individuelle Counts
+                train_count = len(result['phi_data_train'])
+                val_count = len(result['phi_data_val'])
+                
+                file_stats[file_path] = {
+                    'train': train_count,
+                    'val': val_count,
+                    'unassigned': result['unassigned_count']
+                }
+                
+                if train_count > 0:
                     batch_phi_train.append(result['phi_data_train'])
                     batch_target_train.append(result['target_data_train'])
                 
-                if len(result['phi_data_val']) > 0:
+                if val_count > 0:
                     batch_phi_val.append(result['phi_data_val'])
                     batch_target_val.append(result['target_data_val'])
                 
-                total_unassigned += result['unassigned_count']
-                
-                print(f"  ✓ {os.path.basename(file_path)}")
-                
+                print(f"  ✓ {os.path.basename(file_path)} (Train: {train_count}, Val: {val_count})")
+                                
             except Exception as e:
                 print(f"  ✗ {os.path.basename(file_path)}: {e}")
                 progress_tracker.mark_file_failed(file_path, str(e))
@@ -947,10 +1078,13 @@ def process_files_in_batches(files, voxel_tree, voxel_data, voxel_indices,
         # Markiere alle Files im Batch als completed
         for file_path in batch_files:
             if str(file_path) not in [f['file'] for f in progress_tracker.progress_data['failed_files']]:
-                progress_tracker.mark_file_completed(file_path, 
-                                                     len(combined_phi_train) if batch_phi_train else 0,
-                                                     len(combined_phi_val) if batch_phi_val else 0,
-                                                     total_unassigned)
+                stats = file_stats.get(file_path, {'train': 0, 'val': 0, 'unassigned': 0})
+                progress_tracker.mark_file_completed(
+                    file_path,
+                    stats['train'],
+                    stats['val'],
+                    stats['unassigned']
+                )
         
         # Checkpoint nach jedem Batch
         progress_tracker.verify_hdf5_integrity(output_file_val)
@@ -1150,16 +1284,23 @@ def main():
     # Reset-Option prüfen
     if args.reset:
         print("Reset angefordert - lösche bestehende Ergebnisse...")
-        if os.path.exists(output_file_train):  # [GEÄNDERT]
+        if os.path.exists(output_file_train): 
             os.remove(output_file_train)
-        if os.path.exists(output_file_val):    # [NEU]
+        if os.path.exists(output_file_val):    
             os.remove(output_file_val)
         progress_tracker.cleanup()
+        if progress_tracker.split_file.exists():
+            progress_tracker.split_file.unlink()        
         progress_tracker = ProgressTracker(args.output, output_file_train, output_file_val)
 
     # Train/Val Split erstellen
     all_nc_pairs = collect_all_nc_pairs(files)
-    train_pairs, val_pairs = create_train_val_split(all_nc_pairs, args.val_fraction, args.random_seed)
+    val_pairs = create_or_load_train_val_split(
+        progress_tracker, 
+        all_nc_pairs, 
+        args.val_fraction, 
+        args.random_seed
+    )
     
     # Alle Materialien sammeln (nur bei Reset oder wenn noch keine Output-Datei existiert)
     if not os.path.exists(output_file_train):
@@ -1206,13 +1347,6 @@ def main():
     start_time = time.time()
     
     try:
-        # process_files_sequentially(
-        #     files, voxel_tree, voxel_data, voxel_indices,
-        #     args.material_mapping, args.volume_mapping, geometry_params,
-        #     output_file_train, output_file_val, weight, 
-        #     progress_tracker, val_pairs  
-        # )
-
         process_files_in_batches(
             files, voxel_tree, voxel_data, voxel_indices,
             args.material_mapping, args.volume_mapping,
