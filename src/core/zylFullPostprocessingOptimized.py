@@ -522,6 +522,9 @@ def process_single_file(args):
 
         # Chunk-basierte Verarbeitung der optischen Daten
         num_chunks = (total_optical_events - 1) // CHUNK_SIZE + 1
+
+        # NEW: Initialisiere Voxel-Counter für alle NC-Events
+        nc_voxel_counters = {key: Counter() for key in nc_data_dict.keys()}
         
         for chunk_idx in range(num_chunks):
             chunk_start = chunk_idx * CHUNK_SIZE
@@ -582,20 +585,17 @@ def process_single_file(args):
             
             # print_memory_usage(f"Chunk {chunk_idx + 1} Nach Filterung")
             
-            # Gruppierung der Photonen nach (evtid, nC_id)
+        # Gruppierung der Photonen nach (evtid, nC_id)
             photon_groups = defaultdict(list)
             for idx in range(len(photon_evtid_filtered)):
                 photon_groups[(photon_evtid_filtered[idx], photon_nC_id_filtered[idx])].append(idx)
             
-            # Verarbeitung jeder Gruppe
+            # CHANGED: Akkumuliere nur Voxel-Hits für NC-Events in diesem Chunk
             for (e_id, nc_id), photon_indices in photon_groups.items():
                 if (e_id, nc_id) not in nc_data_dict:
                     continue
-                    
-                nc_info = nc_data_dict[(e_id, nc_id)]
                 
-                voxel_counter = Counter()
-                gamma_number_list = []
+                nc_info = nc_data_dict[(e_id, nc_id)]
                 
                 for i in photon_indices:
                     x, y, z = x_filtered[i], y_filtered[i], z_filtered[i]
@@ -603,47 +603,7 @@ def process_single_file(args):
                     if voxel_index == "-1":
                         unassigned_count += 1
                     else:
-                        voxel_counter[voxel_index] += 1
-                    
-                    photon_gamma_energy = photon_gamma_energies_filtered[i]
-                    gamma_number = 0
-                    
-                    for gamma_idx, gamma_energy in enumerate(nc_info['gamma_energies']):
-                        if abs(photon_gamma_energy - gamma_energy) < 0.1:
-                            gamma_number = gamma_idx + 1
-                            break
-                    
-                    gamma_number_list.append(gamma_number)
-                
-                # Phi Data erstellen
-                x = nc_info['nC_x']
-                y = nc_info['nC_y']
-                z = nc_info['nC_z']
-                mat_id = nc_info['material_id']
-                vol_id = nc_info['volume_id']
-                n_gamma = max(0, nc_info['gamma_amount'])
-                e_tot = max(0, nc_info['gamma_tot_energy'])
-                
-                gamma_row = []
-                for i in range(4):
-                    e = nc_info['gamma_energies'][i]
-                    px = nc_info['gamma_px'][i]
-                    py = nc_info['gamma_py'][i]
-                    pz = nc_info['gamma_pz'][i]
-                    
-                    if e < 0:
-                        e, px, py, pz = 0.0, 0.0, 0.0, 0.0
-                    gamma_row.extend([e, px, py, pz])
-                
-                phi_row = [x, y, z, mat_id, vol_id, n_gamma, e_tot] + gamma_row                
-                target_row = [voxel_counter.get(str(voxel_idx), 0) for voxel_idx in voxel_indices]
-
-                if (e_id, nc_id) in validation_set:     
-                    phi_data_val.append(phi_row)        
-                    target_data_val.append(target_row)  
-                else:                                   
-                    phi_data_train.append(phi_row)      
-                    target_data_train.append(target_row) 
+                        nc_voxel_counters[(e_id, nc_id)][voxel_index] += 1
             
             # Chunk-Daten explizit löschen
             del x_filtered, y_filtered, z_filtered
@@ -653,7 +613,49 @@ def process_single_file(args):
             
             # print_memory_usage(f"Chunk {chunk_idx + 1} Ende")
     
+    for (e_id, nc_id), nc_info in nc_data_dict.items():
+        voxel_counter = nc_voxel_counters[(e_id, nc_id)]
+        
+        # Phi Data erstellen
+        x = nc_info['nC_x']
+        y = nc_info['nC_y']
+        z = nc_info['nC_z']
+        mat_id = nc_info['material_id']
+        vol_id = nc_info['volume_id']
+        n_gamma = max(0, nc_info['gamma_amount'])
+        e_tot = max(0, nc_info['gamma_tot_energy'])
+        
+        gamma_row = []
+        for i in range(4):
+            e = nc_info['gamma_energies'][i]
+            px = nc_info['gamma_px'][i]
+            py = nc_info['gamma_py'][i]
+            pz = nc_info['gamma_pz'][i]
+            
+            if e < 0:
+                e, px, py, pz = 0.0, 0.0, 0.0, 0.0
+            gamma_row.extend([e, px, py, pz])
+        
+        phi_row = [x, y, z, mat_id, vol_id, n_gamma, e_tot] + gamma_row
+        target_row = [voxel_counter.get(str(voxel_idx), 0) for voxel_idx in voxel_indices]
+        
+        if (e_id, nc_id) in validation_set:
+            phi_data_val.append(phi_row)
+            target_data_val.append(target_row)
+        else:
+            phi_data_train.append(phi_row)
+            target_data_train.append(target_row)
+    
     # print_memory_usage("Worker Ende")
+
+    total_nc_events = len(nc_data_dict)
+    processed_events = len(phi_data_train) + len(phi_data_val)
+    print(f"  NC-Events: {total_nc_events} total, {processed_events} verarbeitet")
+
+    assert total_nc_events == processed_events, (
+        f"Nicht alle NC-Events wurden verarbeitet! "
+        f"Erwartet: {total_nc_events}, Verarbeitet: {processed_events}"
+    )
     
     return {
         'phi_data_train': np.array(phi_data_train, dtype=np.float32) if phi_data_train else np.array([]),
