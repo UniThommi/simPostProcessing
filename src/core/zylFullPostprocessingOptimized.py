@@ -73,7 +73,8 @@ class ProgressTracker:
             'total_entries_written_train': 0,   
             'total_entries_written_val': 0,
             'total_unassigned': 0,
-            'output_file': str(self.output_file)
+            'output_file_train': str(self.output_file_train), 
+            'output_file_val': str(self.output_file_val)      
         }
     
     def save_progress(self):
