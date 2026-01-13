@@ -91,8 +91,8 @@ class ProgressTracker:
         split_data = {
             'random_seed': random_seed,
             'val_fraction': val_fraction,
-            'train_pairs': [list(pair) for pair in train_pairs],  # Set → List für JSON
-            'val_pairs': [list(pair) for pair in val_pairs],
+            'train_pairs': [[int(pair[0]), int(pair[1])] for pair in train_pairs],  # Set → List für JSON
+            'val_pairs': [[int(pair[0]), int(pair[1])] for pair in val_pairs],
             'created_at': time.time()
         }
         
@@ -497,7 +497,11 @@ def process_single_file(args):
 
     # Anpassbare Chunk-Größe basierend auf verfügbarem Speicher
     available_mem_gb = psutil.virtual_memory().available / (1024**3)
-    if available_mem_gb > 50:
+    if available_mem_gb > 400:
+        CHUNK_SIZE = 50000  # Neu für 500GB Systeme
+    elif available_mem_gb > 200:
+        CHUNK_SIZE = 30000
+    elif available_mem_gb > 50:
         CHUNK_SIZE = 20000
     elif available_mem_gb > 30:
         CHUNK_SIZE = 15000
@@ -1351,7 +1355,7 @@ def main():
             files, voxel_tree, voxel_data, voxel_indices,
             args.material_mapping, args.volume_mapping,
             geometry_params, output_file_train, output_file_val, 
-            weight, progress_tracker, val_pairs, batch_size=10
+            weight, progress_tracker, val_pairs, batch_size=20
         )
     except KeyboardInterrupt:
         print(f"\nVerarbeitung durch Benutzer unterbrochen.")
