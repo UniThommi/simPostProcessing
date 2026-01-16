@@ -55,7 +55,7 @@ def find_simulation_files(base_path: Path, nested: bool = True) -> list[Path]:
 def count_neutron_captures_in_simulation(
     file_path: Path,
     verbose: bool = False
-) -> Set[Tuple[int, int]]:
+) -> int:
     """
     Zählt eindeutige Neutron Captures in einer Simulationsdatei.
     
@@ -72,34 +72,41 @@ def count_neutron_captures_in_simulation(
         OSError: Wenn Datei nicht gelesen werden kann (korrupt)
         KeyError: Wenn erforderliche Datenfelder fehlen
     """
-    nc_pairs = set()
-    
+    unique_pairs_count = 0
+    total_entries = 0
+
     try:
         with h5py.File(file_path, 'r') as f:
             # Prüfe ob MyNeutronCaptureOutput existiert
             if 'hit/MyNeutronCaptureOutput' not in f:
                 print(f"  ⚠ Warnung: {file_path.name} enthält keine MyNeutronCaptureOutput Gruppe")
-                return nc_pairs
+                return 0
             
             # Lese evtid und nC_track_id
             evtid = f['hit/MyNeutronCaptureOutput/evtid/pages'][:]
             nC_track_id = f['hit/MyNeutronCaptureOutput/nC_track_id/pages'][:]
             
+            assert len(evtid) == len(nC_track_id), "Mismatch between evtid and nC_track_id!"
+
+            total_entries += len(evtid)
             # Erstelle Set von eindeutigen Paaren
-            pairs = zip(evtid, nC_track_id)
-            nc_pairs = set(pairs)
+            unique_pairs_in_run = set(zip(evtid, nC_track_id))
+            unique_pairs_count = len(unique_pairs_in_run)
             
             if verbose:
-                print(f"  {file_path.name}: {len(nc_pairs)} eindeutige NC Events")
-                
+                print(
+                f"  {file_path.name}: "
+                f"{unique_pairs_count} eindeutige NCs "
+                f"({total_entries} Einträge)")
+
     except (OSError, KeyError, ValueError) as e:
         # Korrupte oder fehlerhafte Datei
         print(f"  ✗ KORRUPTE DATEI: {file_path.name}")
         print(f"     Fehler: {type(e).__name__}: {e}")
         print(f"     Pfad: {file_path.absolute()}")
         raise  # Re-raise um in count_all_simulation_ncs zu behandeln
-    
-    return nc_pairs
+
+    return unique_pairs_count
 
 
 def count_all_simulation_ncs(
@@ -123,22 +130,22 @@ def count_all_simulation_ncs(
     print(f"{'='*70}")
     print(f"Zu verarbeitende Dateien: {len(sim_files)}\n")
     
-    all_nc_pairs = set()
+    total_nc_count = 0
     files_processed = 0
     files_failed = 0
     corrupt_files = []
     
     for idx, file_path in enumerate(sim_files, 1):
         try:
-            nc_pairs = count_neutron_captures_in_simulation(file_path, verbose)
-            all_nc_pairs.update(nc_pairs)
+            nc_count = count_neutron_captures_in_simulation(file_path, verbose)
+            total_nc_count += nc_count
             files_processed += 1
             
             # Fortschrittsanzeige
             if idx % progress_interval == 0:
                 print(f"  Fortschritt: {idx}/{len(sim_files)} Files verarbeitet "
                       f"({files_processed} erfolgreich, {files_failed} fehlgeschlagen)")
-                print(f"  Akkumulierte eindeutige NCs: {len(all_nc_pairs)}")
+                print(f"  Akkumulierte NCs (über alle Runs): {total_nc_count}")
                 
         except (OSError, KeyError, ValueError) as e:
             files_failed += 1
@@ -150,7 +157,7 @@ def count_all_simulation_ncs(
     print(f"SIMULATION ZUSAMMENFASSUNG:")
     print(f"  Erfolgreich verarbeitet: {files_processed}/{len(sim_files)}")
     print(f"  Fehlgeschlagen (korrupt): {files_failed}")
-    print(f"  Eindeutige Neutron Captures: {len(all_nc_pairs)}")
+    print(f"  Neutron Captures gesamt (Run-lokal eindeutig): {total_nc_count}")
     
     if corrupt_files:
         print(f"\n  ⚠ KORRUPTE DATEIEN ({len(corrupt_files)}):")
@@ -159,8 +166,7 @@ def count_all_simulation_ncs(
     
     print(f"{'='*70}\n")
     
-    return len(all_nc_pairs), corrupt_files
-
+    return total_nc_count, corrupt_files
 
 def count_postprocessed_entries(output_path: Path) -> Dict[str, int]:
     """
@@ -290,8 +296,8 @@ def parse_arguments() -> argparse.Namespace:
 Beispiele:
   # Mit nested Structure (Standard)
   python %(prog)s \\
-    --sim-path /path/to/rawHomogeneousNCsSSD300PMTs \\
-    --output-path /path/to/MLFormatHomogeneousNCsZylSSD300PMTs \\
+    --sim-path /pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/rawHomogeneousNCsSSD300PMTs \\
+    --output-path /pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/MLFormatHomogeneousNCsZylSSD300PMTs/ \\
     --nested
   
   # Ohne nested Structure
@@ -333,8 +339,8 @@ Beispiele:
     parser.add_argument(
         '--progress-interval',
         type=int,
-        default=50,
-        help='Fortschrittsanzeige alle N Dateien (default: 50)'
+        default=100,
+        help='Fortschrittsanzeige alle N Dateien (default: 100)'
     )
     
     return parser.parse_args()

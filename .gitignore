@@ -4,3 +4,5 @@ data/raw/
 data/processed/
 .env
 .vscode
+*.png
+*.txt

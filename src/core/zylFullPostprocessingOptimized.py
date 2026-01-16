@@ -606,8 +606,24 @@ def process_single_file(args):
             photon_evtid_chunk = f['hit']['optical']['evtid']['pages'][chunk_start:chunk_end]
             photon_nC_id_chunk = f['hit']['optical']['nC_track_id']['pages'][chunk_start:chunk_end]
             photon_gamma_energies_chunk = f['hit']['optical']['photon_gamma_kinetic_energy_in_keV']['pages'][chunk_start:chunk_end]
-            
+            photon_det_uid_chunk = f['hit']['optical']['det_uid']['pages'][chunk_start:chunk_end]
+
             # print_memory_usage(f"Chunk {chunk_idx + 1} Nach Datenladen")
+
+            # DETECTOR FILTER: Nur Photonen auf den relevanten Detektoren [1965, 1966, 1967, 1968]
+            valid_detectors = np.array([1965, 1966, 1967, 1968], dtype=np.int32)
+            detector_mask = np.isin(photon_det_uid_chunk, valid_detectors)
+
+            # Wende Detector-Filter auf alle Arrays an
+            x_chunk = x_chunk[detector_mask]
+            y_chunk = y_chunk[detector_mask]
+            z_chunk = z_chunk[detector_mask]
+            px_chunk = px_chunk[detector_mask]
+            py_chunk = py_chunk[detector_mask]
+            pz_chunk = pz_chunk[detector_mask]
+            photon_evtid_chunk = photon_evtid_chunk[detector_mask]
+            photon_nC_id_chunk = photon_nC_id_chunk[detector_mask]
+            photon_gamma_energies_chunk = photon_gamma_energies_chunk[detector_mask]
         
             # Momentum filtering für diesen Chunk
             mask_bot = (z_chunk <= z_cut_bot)
@@ -642,6 +658,7 @@ def process_single_file(args):
             # Nicht mehr benötigte Arrays löschen
             del x_chunk, y_chunk, z_chunk, px_chunk, py_chunk, pz_chunk
             del photon_evtid_chunk, photon_nC_id_chunk, photon_gamma_energies_chunk
+            del detector_mask
             del mask_bot, mask_top, mask_barrel, mask_bot_valid, mask_top_valid, mask_barrel_valid, final_mask
             gc.collect()
             
