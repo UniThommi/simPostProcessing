@@ -181,9 +181,15 @@ class ProgressTracker:
             self.save_progress()
 
     def create_checkpoint(self, output_file):
-        """Erstellt einen Checkpoint der aktuellen HDF5-Datei"""
+        """Erstellt einen Checkpoint der aktuellen HDF5-Datei mit Rotation"""
         checkpoint_file = str(output_file).replace('.hdf5', '_checkpoint.hdf5')
+        checkpoint_old = str(output_file).replace('.hdf5', '_checkpoint_old.hdf5')
+
         try:
+            # Rotate checkpoints
+            if os.path.exists(checkpoint_file):
+                shutil.move(checkpoint_file, checkpoint_old)
+            
             shutil.copy2(output_file, checkpoint_file)
             print(f"  Checkpoint erstellt: {os.path.basename(checkpoint_file)}")
         except Exception as e:
@@ -236,63 +242,72 @@ def remapMaterialIDsToGlobal(
     local_mat_map: dict,
     local_material_ids
 ) -> tuple[np.ndarray, dict]:
-    """Vectorized material ID remapping using dictionary lookups"""
-    if os.path.exists(glob_mapping_json_path):
-        globMaterialMapping = loadMapping(glob_mapping_json_path)
-    else:
-        globMaterialMapping = {}
-
+    """Vectorized material ID remapping - READ-ONLY version"""
+    
+    # Lade globales Mapping (sollte bereits vollständig sein!)
+    if not os.path.exists(glob_mapping_json_path):
+        raise RuntimeError(
+            f"Globales Material-Mapping fehlt: {glob_mapping_json_path}\n"
+            f"Wurde collect_all_materials_first() ausgeführt?"
+        )
+    
+    globMaterialMapping = loadMapping(glob_mapping_json_path)
+    
     local_material_ids = np.array(local_material_ids)
     unique_local_ids = np.unique(local_material_ids)
     mapping_dict = {}
-    max_global_id = max(globMaterialMapping.values()) if globMaterialMapping else -1
 
-    # Build mapping dictionary for unique IDs
+    # CHANGED: Nur mappen, NICHT erweitern!
     for local_id in unique_local_ids:
         local_name = local_mat_map[local_id]
-        if local_name in globMaterialMapping:
-            mapping_dict[local_id] = globMaterialMapping[local_name]
-        else:
-            max_global_id += 1
-            globMaterialMapping[local_name] = max_global_id
-            mapping_dict[local_id] = max_global_id
+        
+        if local_name not in globMaterialMapping:
+            raise RuntimeError(
+                f"Material '{local_name}' nicht im globalen Mapping gefunden!\n"
+                f"Dies sollte nicht passieren nach collect_all_materials_first().\n"
+                f"Verfügbare Materialien: {list(globMaterialMapping.keys())}"
+            )
+        
+        mapping_dict[local_id] = globMaterialMapping[local_name]
 
     # Vectorize the mapping process
     vectorized_mapper = np.vectorize(mapping_dict.get)
     global_material_ids = vectorized_mapper(local_material_ids)
 
-    return global_material_ids, globMaterialMapping
+    return global_material_ids, globMaterialMapping  # Mapping unverändert zurückgeben
 
 def remapVolumeIDsToGlobal(
     glob_mapping_json_path: str,
     local_vol_map: dict,
     local_volume_ids
 ) -> tuple[np.ndarray, dict]:
-    """Vectorized volume ID remapping using dictionary lookups"""
-    if os.path.exists(glob_mapping_json_path):
-        globVolumeMapping = loadMapping(glob_mapping_json_path)
-    else:
-        globVolumeMapping = {}
-
+    """Vectorized volume ID remapping - READ-ONLY version"""
+    
+    if not os.path.exists(glob_mapping_json_path):
+        raise RuntimeError(
+            f"Globales Volume-Mapping fehlt: {glob_mapping_json_path}\n"
+            f"Wurde collect_all_volumes_first() ausgeführt?"
+        )
+    
+    globVolumeMapping = loadMapping(glob_mapping_json_path)
+    
     local_volume_ids = np.array(local_volume_ids)
     unique_local_ids = np.unique(local_volume_ids)
     mapping_dict = {}
-    max_global_id = max(globVolumeMapping.values()) if globVolumeMapping else -1
 
-    # Build mapping dictionary for unique IDs
     for local_id in unique_local_ids:
         local_name = local_vol_map[local_id]
-        # Sanitize empty string BEFORE lookup
         local_name_clean = "noVolume" if local_name == "" else local_name
 
-        if local_name_clean in globVolumeMapping:
-            mapping_dict[local_id] = globVolumeMapping[local_name_clean]
-        else:
-            max_global_id += 1
-            globVolumeMapping[local_name_clean] = max_global_id
-            mapping_dict[local_id] = max_global_id
+        if local_name_clean not in globVolumeMapping:
+            raise RuntimeError(
+                f"Volume '{local_name_clean}' nicht im globalen Mapping gefunden!\n"
+                f"Dies sollte nicht passieren nach collect_all_volumes_first().\n"
+                f"Verfügbare Volumes: {list(globVolumeMapping.keys())}"
+            )
+        
+        mapping_dict[local_id] = globVolumeMapping[local_name_clean]
 
-    # Vectorize the mapping process
     vectorized_mapper = np.vectorize(mapping_dict.get)
     global_volume_ids = vectorized_mapper(local_volume_ids)
 
@@ -442,13 +457,28 @@ def build_voxel_tree(voxels):
     centers = [voxel['center'] for voxel in voxels]
     return KDTree(centers)
     
-def defineZylinder(geometry_name):
+def defineZylinder(geometry_name, valid_detectors=None):
+    """
+    Definiert Zylinder-Geometrie und optionale Detector-UIDs.
+    
+    Args:
+        geometry_name: Name der Geometrie ('currentDist')
+        valid_detectors: Liste der gültigen Detector UIDs (default: [1965, 1966, 1967, 1968])
+    
+    Returns:
+        tuple: Geometrie-Parameter inkl. valid_detectors
+    """
+
     valid_geometry_names = ["currentDist"]
     if not geometry_name in valid_geometry_names:
         print("Invalid geometry name. It must be one of the following:")
         for name in valid_geometry_names:
             print(name)
         sys.exit()
+
+    # Default Detector UIDs
+    if valid_detectors is None:
+        valid_detectors = [1965, 1966, 1967, 1968]
 
     t_zylinder = 1         # mm          
     l_voxel = 195      # mm  sqrt((110mm)² * pi) = 194,97
@@ -476,7 +506,7 @@ def defineZylinder(geometry_name):
     h_ref = 8080 # Müsste eigentlich 20 mm höher sein
     z_ref = 20
 
-    return t_zylinder, l_voxel, t_voxel, r_pit, dz_pit, r_zyl_bot, r_zyl_top, z_offset, r_zylinder, h_zylinder, z_origin, r_ref, h_ref, z_ref
+    return (t_zylinder, l_voxel, t_voxel, r_pit, dz_pit, r_zyl_bot, r_zyl_top, z_offset, r_zylinder, h_zylinder, z_origin, r_ref, h_ref, z_ref, valid_detectors)
 
 def process_single_file(args):
     """Verarbeitet eine einzelne HDF5-Datei"""
@@ -485,6 +515,7 @@ def process_single_file(args):
     
     # Geometrie-Parameter entpacken
     h_zylinder = geometry_params['h_zylinder']
+    valid_detectors = geometry_params.get('valid_detectors', [1965, 1966, 1967, 1968])
     
     print(f"Worker {mp.current_process().pid}: Verarbeite {os.path.basename(file_path)}")
     # print_memory_usage("Start Worker")
@@ -522,6 +553,7 @@ def process_single_file(args):
         gamma_tot_energy = f['hit']['MyNeutronCaptureOutput']['nC_gamma_total_energy_in_keV']['pages'][:]
         nc_material_ids = f['hit']['MyNeutronCaptureOutput']['nC_material_id']['pages'][:]
         nc_volume_ids = f['hit']['MyNeutronCaptureOutput']['nC_phys_vol_id']['pages'][:]
+        nc_time = f['hit']['MyNeutronCaptureOutput']['nC_time_in_ns']['pages'][:]
         
         # Gamma-Daten lesen (1-4)
         gamma_data_nc = {}
@@ -555,6 +587,7 @@ def process_single_file(args):
                 'nC_x': nC_x[idx],
                 'nC_y': nC_y[idx], 
                 'nC_z': nC_z[idx],
+                'nC_time': nc_time[idx],
                 'gamma_amount': gamma_amount[idx],
                 'gamma_tot_energy': gamma_tot_energy[idx],
                 'material_id': globalMaterialIDs[idx],
@@ -607,12 +640,13 @@ def process_single_file(args):
             photon_nC_id_chunk = f['hit']['optical']['nC_track_id']['pages'][chunk_start:chunk_end]
             photon_gamma_energies_chunk = f['hit']['optical']['photon_gamma_kinetic_energy_in_keV']['pages'][chunk_start:chunk_end]
             photon_det_uid_chunk = f['hit']['optical']['det_uid']['pages'][chunk_start:chunk_end]
+            photon_time_chunk = f['hit']['optical']['time_in_ns']['pages'][chunk_start:chunk_end]
 
             # print_memory_usage(f"Chunk {chunk_idx + 1} Nach Datenladen")
 
-            # DETECTOR FILTER: Nur Photonen auf den relevanten Detektoren [1965, 1966, 1967, 1968]
-            valid_detectors = np.array([1965, 1966, 1967, 1968], dtype=np.int32)
-            detector_mask = np.isin(photon_det_uid_chunk, valid_detectors)
+            # DETECTOR FILTER: Nur Photonen auf den relevanten Detektoren
+            valid_detectors_array = np.array(valid_detectors, dtype=np.int32)
+            detector_mask = np.isin(photon_det_uid_chunk, valid_detectors_array)
 
             # Wende Detector-Filter auf alle Arrays an
             x_chunk = x_chunk[detector_mask]
@@ -624,14 +658,48 @@ def process_single_file(args):
             photon_evtid_chunk = photon_evtid_chunk[detector_mask]
             photon_nC_id_chunk = photon_nC_id_chunk[detector_mask]
             photon_gamma_energies_chunk = photon_gamma_energies_chunk[detector_mask]
+            photon_time_chunk = photon_time_chunk[detector_mask]
+
+            # Erstelle Lookup-Array für NC-Zeiten (vektorisiert)
+            nc_times = np.full(len(photon_time_chunk), np.inf, dtype=np.float32)  # Default: inf (ungültig)
+
+            # Baue Event-ID zu Index Mapping für schnellen Zugriff
+            for idx in range(len(photon_evtid_chunk)):
+                key = (photon_evtid_chunk[idx], photon_nC_id_chunk[idx])
+                if key in nc_data_dict:
+                    nc_times[idx] = nc_data_dict[key]['nC_time']
+
+            # Vektorisierte Zeitfenster-Prüfung
+            time_mask = (
+                (nc_times != np.inf) &  # NC-Event existiert
+                (photon_time_chunk >= nc_times) &  # Photon nach NC
+                (photon_time_chunk <= nc_times + 200.0)  # Innerhalb 200ns
+            )
+
+            # Logging für orphaned photons
+            orphaned_in_chunk = np.sum(nc_times == np.inf)
+            if orphaned_in_chunk > 0:
+                orphaned_photons += orphaned_in_chunk
+
+            # Wende Zeitfilter auf alle Arrays an
+            x_chunk = x_chunk[time_mask]
+            y_chunk = y_chunk[time_mask]
+            z_chunk = z_chunk[time_mask]
+            px_chunk = px_chunk[time_mask]
+            py_chunk = py_chunk[time_mask]
+            pz_chunk = pz_chunk[time_mask]
+            photon_evtid_chunk = photon_evtid_chunk[time_mask]
+            photon_nC_id_chunk = photon_nC_id_chunk[time_mask]
+            photon_gamma_energies_chunk = photon_gamma_energies_chunk[time_mask]
+            photon_time_chunk = photon_time_chunk[time_mask]  # Optional, falls später noch benötigt
         
             # Momentum filtering für diesen Chunk
             mask_bot = (z_chunk <= z_cut_bot)
             mask_top = (z_chunk >= z_cut_top)
             mask_barrel = ~mask_bot & ~mask_top
             
-            mask_bot_valid = (pz_chunk <= 0)
-            mask_top_valid = (pz_chunk >= 0)
+            mask_bot_valid = (pz_chunk[mask_bot] <= 0)    
+            mask_top_valid = (pz_chunk[mask_top] >= 0)    
             
             # Nur für barrel region berechnen
             mask_barrel_valid = np.zeros(np.sum(mask_barrel), dtype=bool)
@@ -643,8 +711,8 @@ def process_single_file(args):
             
             # Combine masks
             final_mask = np.zeros_like(z_chunk, dtype=bool)
-            final_mask[mask_bot] = mask_bot_valid[mask_bot]
-            final_mask[mask_top] = mask_top_valid[mask_top]
+            final_mask[mask_bot] = mask_bot_valid
+            final_mask[mask_top] = mask_top_valid
             final_mask[mask_barrel] = mask_barrel_valid
             
             # Gefilterte Daten
@@ -658,7 +726,7 @@ def process_single_file(args):
             # Nicht mehr benötigte Arrays löschen
             del x_chunk, y_chunk, z_chunk, px_chunk, py_chunk, pz_chunk
             del photon_evtid_chunk, photon_nC_id_chunk, photon_gamma_energies_chunk
-            del detector_mask
+            del detector_mask, time_mask, photon_time_chunk
             del mask_bot, mask_top, mask_barrel, mask_bot_valid, mask_top_valid, mask_barrel_valid, final_mask
             gc.collect()
             
@@ -691,9 +759,17 @@ def process_single_file(args):
             del photon_groups
             
             # print_memory_usage(f"Chunk {chunk_idx + 1} Ende")
+
+    nc_without_photons = 0
+    nc_with_photons = 0
     
     for (e_id, nc_id), nc_info in nc_data_dict.items():
         voxel_counter = nc_voxel_counters[(e_id, nc_id)]
+
+        if not voxel_counter:  # Kein Photon detektiert
+            nc_without_photons += 1
+        else:
+            nc_with_photons += 1
         
         # Phi Data erstellen
         x = nc_info['nC_x']
@@ -731,12 +807,18 @@ def process_single_file(args):
     processed_events = len(phi_data_train) + len(phi_data_val)
     print(f"  NC-Events: {total_nc_events} total, {processed_events} verarbeitet")
     if orphaned_photons > 0:
-        print(f"  ⚠ WARNUNG: {orphaned_photons} Photonen ohne zugehöriges NC-Event verworfen")
+        print(f"  ℹ INFO: {orphaned_photons} Photonen ohne zugehöriges NC-Event verworfen. Erwartet für Photonen die durch Prozesse vor einem NC Event entstehen.")
 
     assert total_nc_events == processed_events, (
         f"Nicht alle NC-Events wurden verarbeitet! "
         f"Erwartet: {total_nc_events}, Verarbeitet: {processed_events}"
     )
+
+    print(f"  NC-Events ohne Photonen: {nc_without_photons}")
+    print(f"  NC-Events mit Photonen: {nc_with_photons}")
+
+    del nc_voxel_counters, nc_data_dict
+    gc.collect()
     
     return {
         'phi_data_train': np.array(phi_data_train, dtype=np.float32) if phi_data_train else np.array([]),
@@ -927,16 +1009,27 @@ def create_or_load_train_val_split(progress_tracker, all_nc_pairs,
             # Konvertiere Set → sortierte Liste für Determinismus
             all_pairs_list = sorted(list(all_nc_pairs))  # WICHTIG: sortieren!
             
+            # Gruppiere nach evtid
+            evtid_groups = defaultdict(list)
+            for evt, nc in all_nc_pairs:
+                evtid_groups[evt].append((evt, nc))
+
+            # Split auf Event-Level
+            evtids = sorted(evtid_groups.keys())
             np.random.seed(random_seed)
-            indices = np.arange(len(all_pairs_list))
-            np.random.shuffle(indices)
-            
-            split_idx = int(len(all_pairs_list) * (1 - val_fraction))
-            train_indices = indices[:split_idx]
-            val_indices = indices[split_idx:]
-            
-            train_pairs = set(all_pairs_list[i] for i in train_indices)
-            val_pairs = set(all_pairs_list[i] for i in val_indices)
+            np.random.shuffle(evtids)
+
+            split_idx = int(len(evtids) * (1 - val_fraction))
+            train_evtids = set(evtids[:split_idx])
+
+            # Alle NC-Events eines Events im gleichen Split
+            train_pairs = set()
+            val_pairs = set()
+            for evt, pairs in evtid_groups.items():
+                if evt in train_evtids:
+                    train_pairs.update(pairs)
+                else:
+                    val_pairs.update(pairs)
             
             print(f"Train/Val Split erstellt:")
             print(f"  Training: {len(train_pairs)} NC-Events ({(1-val_fraction)*100:.0f}%)")
@@ -1118,7 +1211,7 @@ def process_files_in_batches(files, voxel_tree, voxel_data, voxel_indices,
 # ----------------------------------------------------------------------------
 # Allgemeine Funktionen
 # ----------------------------------------------------------------------------
-def create_or_open_output_file(output_path, file_index, voxel_indices, mat_map, vol_map, radius, suffix=""):
+def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol_map, radius, suffix=""):
     """Erstellt eine neue HDF5-Datei oder öffnet eine bestehende"""
     output_file = os.path.join(output_path, f"resum_output_{file_index}{suffix}.hdf5") 
     
@@ -1164,8 +1257,8 @@ def create_or_open_output_file(output_path, file_index, voxel_indices, mat_map, 
             vol_map_grp.create_dataset(str(key_clean), data=int(value))
         
         # Voxel data UND Target datasets gleichzeitig initialisieren
-        print(f"  Initialisiere {len(voxel_indices)} Voxel mit Target-Datasets...")        
-        for voxel in voxel_indices:  # voxel_indices ist hier voxel_data
+        print(f"  Initialisiere {len(voxel_data)} Voxel mit Target-Datasets...")        
+        for voxel in voxel_data:
             if isinstance(voxel, dict):
                 voxel_idx = voxel['index']
                 
@@ -1192,7 +1285,7 @@ def create_or_open_output_file(output_path, file_index, voxel_indices, mat_map, 
                     compression_opts=1
                 )
         
-        print(f"  ✓ Alle {len(voxel_indices)} Voxel-Datasets erstellt")
+        print(f"  ✓ Alle {len(voxel_data)} Voxel-Datasets erstellt")
     
     return output_file
 
@@ -1252,6 +1345,9 @@ Beispiele:
     parser.add_argument('-g', '--geometry', default='currentDist',
                         choices=['currentDist'],
                         help='Geometrie-Name (default: currentDist)')
+    parser.add_argument('--valid-detectors', type=int, nargs='+', 
+                    default=[1965, 1966, 1967, 1968],
+                    help='Liste der gültigen Detector UIDs (default: 1965 1966 1967 1968)')
     parser.add_argument('--verbose', '-V', action='store_true',
                         help='Ausführliche Ausgabe')
     
@@ -1276,7 +1372,9 @@ def main():
     
     # Konfiguration
     geometry_name = args.geometry
-    t_zylinder, l_voxel, t_voxel, r_pit, dz_pit, r_zyl_bot, r_zyl_top, z_offset, r_zylinder, h_zylinder, z_origin, r_ref, h_ref, z_ref = defineZylinder(geometry_name)
+    geometry_result = defineZylinder(geometry_name, args.valid_detectors)
+    (t_zylinder, l_voxel, t_voxel, r_pit, dz_pit, r_zyl_bot, r_zyl_top, 
+     z_offset, r_zylinder, h_zylinder, z_origin, r_ref, h_ref, z_ref, valid_detectors) = geometry_result
 
     # Voxel-Daten laden
     print("Lade Voxel-Daten...")
@@ -1351,7 +1449,10 @@ def main():
     output_file_val = create_or_open_output_file(args.output, 0, voxel_data, global_material_mapping, global_volume_mapping, r_zylinder, "_validation")
     
     # Geometrie-Parameter für Worker
-    geometry_params = {'h_zylinder': h_zylinder}
+    geometry_params = {
+        'h_zylinder': h_zylinder,
+        'valid_detectors': valid_detectors
+    }
     
     # Aktuelle Statistiken anzeigen
     stats = progress_tracker.get_statistics()
