@@ -78,21 +78,21 @@ class ProgressTracker:
             'output_file_val': str(self.output_file_val)      
         }
     
-    def save_train_val_split(self, train_pairs, val_pairs, random_seed, val_fraction):
+    def save_train_val_split(self, train_triplets, val_triplets, random_seed, val_fraction):
         """
         Speichert Train/Val Split für Reproduzierbarkeit.
         
         Args:
-            train_pairs: Set von (evtid, nC_id) Tupeln für Training
-            val_pairs: Set von (evtid, nC_id) Tupeln für Validation
+            train_triplets: Set von (file_idx, evtid, nC_id) Tupeln für Training
+            val_triplets: Set von (file_idx, evtid, nC_id) Tupeln für Validation
             random_seed: Verwendeter Random Seed
             val_fraction: Validation-Anteil
         """
         split_data = {
             'random_seed': random_seed,
             'val_fraction': val_fraction,
-            'train_pairs': [[int(pair[0]), int(pair[1])] for pair in train_pairs],  # Set → List für JSON
-            'val_pairs': [[int(pair[0]), int(pair[1])] for pair in val_pairs],
+            'train_triplets': [[int(t[0]), int(t[1]), int(t[2])] for t in train_triplets],
+            'val_triplets': [[int(t[0]), int(t[1]), int(t[2])] for t in val_triplets],
             'created_at': time.time()
         }
         
@@ -108,7 +108,7 @@ class ProgressTracker:
         Lädt gespeicherten Train/Val Split.
         
         Returns:
-            tuple: (train_pairs, val_pairs, random_seed, val_fraction) oder None
+            tuple: (train_triplets, val_triplets, random_seed, val_fraction) oder None
         """
         if not self.split_file.exists():
             return None
@@ -117,18 +117,18 @@ class ProgressTracker:
             with open(self.split_file, 'r') as f:
                 split_data = json.load(f)
             
-            train_pairs = set(tuple(pair) for pair in split_data['train_pairs'])
-            val_pairs = set(tuple(pair) for pair in split_data['val_pairs'])
+            train_triplets = set(tuple(t) for t in split_data['train_triplets'])
+            val_triplets = set(tuple(t) for t in split_data['val_triplets'])
             
             print(f"Train/Val Split geladen:")
-            print(f"  Training: {len(train_pairs)} NC-Events")
-            print(f"  Validation: {len(val_pairs)} NC-Events")
+            print(f"  Training: {len(train_triplets)} NC-Events")
+            print(f"  Validation: {len(val_triplets)} NC-Events")
             print(f"  Random Seed: {split_data['random_seed']}")
             print(f"  Val Fraction: {split_data['val_fraction']}")
             
-            return (train_pairs, val_pairs, 
-                   split_data['random_seed'], 
-                   split_data['val_fraction'])
+            return (train_triplets, val_triplets, 
+                split_data['random_seed'], 
+                split_data['val_fraction'])
         
         except (json.JSONDecodeError, IOError, KeyError) as e:
             print(f"Warnung: Konnte Split nicht laden ({e}), erstelle neuen")
@@ -509,9 +509,8 @@ def defineZylinder(geometry_name, valid_detectors=None):
     return (t_zylinder, l_voxel, t_voxel, r_pit, dz_pit, r_zyl_bot, r_zyl_top, z_offset, r_zylinder, h_zylinder, z_origin, r_ref, h_ref, z_ref, valid_detectors)
 
 def process_single_file(args):
-    """Verarbeitet eine einzelne HDF5-Datei"""
-    (file_path, voxel_tree, voxel_data, voxel_indices, 
-     materialMappingPath, volumeMappingPath, geometry_params, validation_set) = args
+    (file_path, file_idx, voxel_tree, voxel_data, voxel_indices, 
+     materialMappingPath, volumeMappingPath, geometry_params, val_triplets) = args
     
     # Geometrie-Parameter entpacken
     h_zylinder = geometry_params['h_zylinder']
@@ -737,10 +736,9 @@ def process_single_file(args):
             for idx in range(len(photon_evtid_filtered)):
                 photon_groups[(photon_evtid_filtered[idx], photon_nC_id_filtered[idx])].append(idx)
             
-            # CHANGED: Akkumuliere nur Voxel-Hits für NC-Events in diesem Chunk
+            # Akkumuliere nur Voxel-Hits für NC-Events in diesem Chunk
             for (e_id, nc_id), photon_indices in photon_groups.items():
                 if (e_id, nc_id) not in nc_data_dict:
-                    orphaned_photons += len(photon_indices)
                     continue
                 
                 nc_info = nc_data_dict[(e_id, nc_id)]
@@ -794,7 +792,7 @@ def process_single_file(args):
         phi_row = [x, y, z, mat_id, vol_id, n_gamma, e_tot] + gamma_row
         target_row = [voxel_counter.get(str(voxel_idx), 0) for voxel_idx in voxel_indices]
         
-        if (e_id, nc_id) in validation_set:
+        if (file_idx, e_id, nc_id) in val_triplets:
             phi_data_val.append(phi_row)
             target_data_val.append(target_row)
         else:
@@ -867,15 +865,10 @@ def append_results_to_hdf5(output_file, result_data, voxel_indices, weight, data
                 dset.resize((new_size,))
                 dset[old_size:new_size] = phi_data[:, i]
             else:
-                # Neues Dataset erstellen
-                phi_grp.create_dataset(
-                col_name, 
-                data=phi_data[:, i], 
-                maxshape=(None,),  # ← HINZUFÜGEN!
-                compression='gzip', 
-                compression_opts=1,
-                chunks=True
-            )
+                raise RuntimeError(
+                    f"Unreachable code reached: Dataset '{col_name}' should already exist "
+                    f"or be handled in a previous branch."
+                )
         
         # Für target data: FIXED - Use resize for efficiency
         for i, voxel_idx in enumerate(voxel_indices):
@@ -918,40 +911,47 @@ def append_results_to_hdf5(output_file, result_data, voxel_indices, weight, data
     
     return num_entries
 
-def collect_all_nc_pairs(files): 
-    """Sammelt alle (evtid, nC_id) Paare aus allen Files"""
+def collect_all_nc_triplets(files): 
+    """
+    Sammelt alle (file_idx, evtid, nC_id) Triplets aus allen Files.
+    Verwendet file_idx um Uniqueness über mehrere Simulationen hinweg zu gewährleisten.
+    """
     print("Sammle alle Neutron Capture Events für Train/Val Split...")
-    all_nc_pairs = set()
+    all_nc_triplets = set()
     
-    for file_path in files:
+    for file_idx, file_path in enumerate(files):
         try:
             with h5py.File(file_path, 'r') as f:
                 evtid = f['hit']['MyNeutronCaptureOutput']['evtid']['pages'][:]
                 nC_id = f['hit']['MyNeutronCaptureOutput']['nC_track_id']['pages'][:]
-                pairs = zip(evtid, nC_id)
-                all_nc_pairs.update(pairs)
+                # Triplets mit file_idx für Uniqueness
+                triplets = [(file_idx, int(evt), int(nc)) for evt, nc in zip(evtid, nC_id)]
+                all_nc_triplets.update(triplets)
         except Exception as e:
             print(f"Fehler beim Lesen von {file_path}: {e}")
             continue
     
-    print(f"Gefunden: {len(all_nc_pairs)} einzigartige NC-Events")
-    return all_nc_pairs
+    print(f"Gefunden: {len(all_nc_triplets)} einzigartige NC-Events über {len(files)} Files")
+    return all_nc_triplets
 
 def calculate_weight_from_files(files, sample_size=None):
-    """Berechnet Gewichtung basierend auf einzigartigen (evtid, nC_id) Paaren"""
+    """
+    Berechnet Gewichtung basierend auf einzigartigen (file_idx, evtid, nC_id) Triplets.
+    Verwendet file_idx um Kollisionen über Files hinweg zu vermeiden.
+    """
     print("Berechne Gewichtung...")
-    unique_pairs = set()
+    unique_triplets = set()
     
     # Wenn sample_size angegeben, nur Teilmenge verwenden
     files_to_sample = files[:sample_size] if sample_size else files
     
-    for file in files_to_sample:
+    for file_idx, file in enumerate(files_to_sample):
         try:
             with h5py.File(file, 'r') as f:
                 evtid = f['hit']['MyNeutronCaptureOutput']['evtid']['pages'][:]
                 nC_id = f['hit']['MyNeutronCaptureOutput']['nC_track_id']['pages'][:]
-                pairs = zip(evtid, nC_id)
-                unique_pairs.update(pairs)
+                triplets = [(file_idx, int(evt), int(nc)) for evt, nc in zip(evtid, nC_id)]
+                unique_triplets.update(triplets)
         except Exception as e:
             print(f"Warnung: Konnte {file} für Gewichtung nicht lesen: {e}")
             continue
@@ -959,92 +959,91 @@ def calculate_weight_from_files(files, sample_size=None):
     # Hochrechnung wenn nur Sample verwendet wurde
     if sample_size and sample_size < len(files):
         scale_factor = len(files) / sample_size
-        estimated_unique_pairs = len(unique_pairs) * scale_factor
-        weight = 1 / estimated_unique_pairs if estimated_unique_pairs > 0 else 1.0
-        print(f"Geschätztes Gewicht basierend auf {sample_size} Files: {weight}")
+        estimated_unique_triplets = len(unique_triplets) * scale_factor
+        weight = 1 / estimated_unique_triplets if estimated_unique_triplets > 0 else 1.0
+        print(f"Geschätztes Gewicht basierend auf {sample_size} Files: {weight:.2e}")
     else:
-        weight = 1 / len(unique_pairs) if unique_pairs else 1.0
-        print(f"Gewicht basierend auf allen Files: {weight}")
+        weight = 1 / len(unique_triplets) if unique_triplets else 1.0
+        print(f"Gewicht basierend auf allen {len(files)} Files: {weight:.2e}")
     
     return weight
 
-def create_or_load_train_val_split(progress_tracker, all_nc_pairs, 
+def create_or_load_train_val_split(progress_tracker, all_nc_triplets, 
                                    val_fraction, random_seed):
-        """
-        Erstellt oder lädt Train/Val Split mit Reproduzierbarkeit.
+    """
+    Erstellt oder lädt Train/Val Split mit Reproduzierbarkeit.
+    Verwendet (file_idx, evtid, nC_id) Triplets für Uniqueness über Files hinweg.
+    """
+    # Versuche bestehenden Split zu laden
+    loaded_split = progress_tracker.load_train_val_split()
+    
+    if loaded_split is not None:
+        train_triplets, val_triplets, saved_seed, saved_fraction = loaded_split
         
-        FIXED: Verwendet gespeicherten Split falls vorhanden
-        """
-        # Versuche bestehenden Split zu laden
-        loaded_split = progress_tracker.load_train_val_split()
+        # Warne wenn Parameter nicht übereinstimmen
+        if saved_seed != random_seed:
+            print(f"⚠ WARNUNG: Gespeicherter Random Seed ({saved_seed}) != aktueller Seed ({random_seed})")
+            print(f"  Verwende gespeicherten Split für Konsistenz!")
         
-        if loaded_split is not None:
-            train_pairs, val_pairs, saved_seed, saved_fraction = loaded_split
-            
-            # Warne wenn Parameter nicht übereinstimmen
-            if saved_seed != random_seed:
-                print(f"⚠ WARNUNG: Gespeicherter Random Seed ({saved_seed}) != aktueller Seed ({random_seed})")
-                print(f"  Verwende gespeicherten Split für Konsistenz!")
-            
-            if abs(saved_fraction - val_fraction) > 0.001:
-                print(f"⚠ WARNUNG: Gespeicherte Val-Fraction ({saved_fraction}) != aktuelle ({val_fraction})")
-                print(f"  Verwende gespeicherten Split für Konsistenz!")
-            
-            # Validierung: Prüfe ob alle Paare noch existieren
-            all_pairs_set = set(all_nc_pairs)
-            missing_train = train_pairs - all_pairs_set
-            missing_val = val_pairs - all_pairs_set
-            
-            if missing_train or missing_val:
-                print(f"⚠ WARNUNG: {len(missing_train) + len(missing_val)} NC-Events aus Split fehlen in Daten!")
-                print(f"  Erstelle neuen Split...")
-                loaded_split = None
+        if abs(saved_fraction - val_fraction) > 0.001:
+            print(f"⚠ WARNUNG: Gespeicherte Val-Fraction ({saved_fraction}) != aktuelle ({val_fraction})")
+            print(f"  Verwende gespeicherten Split für Konsistenz!")
+        
+        # Validierung: Prüfe ob alle Triplets noch existieren
+        all_triplets_set = set(all_nc_triplets)
+        missing_train = train_triplets - all_triplets_set
+        missing_val = val_triplets - all_triplets_set
+        
+        if missing_train or missing_val:
+            print(f"⚠ WARNUNG: {len(missing_train) + len(missing_val)} NC-Events aus Split fehlen in Daten!")
+            print(f"  Erstelle neuen Split...")
+            loaded_split = None
+        else:
+            print(f"✓ Verwende gespeicherten Split: {len(val_triplets)} Validation-Events")
+            return val_triplets  # Nur val_triplets wird im Code verwendet
+    
+    # Erstelle neuen Split
+    if loaded_split is None:
+        print(f"Erstelle neuen Train/Val Split (Event-Level) mit Seed {random_seed}...")
+        
+        # Gruppiere nach (file_idx, evtid) um Data Leakage zu vermeiden
+        evtid_groups = defaultdict(list)
+        for file_idx, evt, nc in all_nc_triplets:
+            evtid_groups[(file_idx, evt)].append((file_idx, evt, nc))
+
+        # Split auf Event-Level (innerhalb jedes Files)
+        event_keys = sorted(evtid_groups.keys())
+        np.random.seed(random_seed)
+        np.random.shuffle(event_keys)
+
+        split_idx = int(len(event_keys) * (1 - val_fraction))
+        train_event_keys = set(event_keys[:split_idx])
+
+        # Alle NC-Events eines (file_idx, evtid) Paares im gleichen Split
+        train_triplets = set()
+        val_triplets = set()
+        for evt_key, triplets in evtid_groups.items():
+            if evt_key in train_event_keys:
+                train_triplets.update(triplets)
             else:
-                return val_pairs  # Nur val_pairs wird im Code verwendet
+                val_triplets.update(triplets)
         
-        # Erstelle neuen Split
-        if loaded_split is None:
-            print(f"Erstelle neuen Train/Val Split mit Seed {random_seed}...")
-            
-            # Konvertiere Set → sortierte Liste für Determinismus
-            all_pairs_list = sorted(list(all_nc_pairs))  # WICHTIG: sortieren!
-            
-            # Gruppiere nach evtid
-            evtid_groups = defaultdict(list)
-            for evt, nc in all_nc_pairs:
-                evtid_groups[evt].append((evt, nc))
-
-            # Split auf Event-Level
-            evtids = sorted(evtid_groups.keys())
-            np.random.seed(random_seed)
-            np.random.shuffle(evtids)
-
-            split_idx = int(len(evtids) * (1 - val_fraction))
-            train_evtids = set(evtids[:split_idx])
-
-            # Alle NC-Events eines Events im gleichen Split
-            train_pairs = set()
-            val_pairs = set()
-            for evt, pairs in evtid_groups.items():
-                if evt in train_evtids:
-                    train_pairs.update(pairs)
-                else:
-                    val_pairs.update(pairs)
-            
-            print(f"Train/Val Split erstellt:")
-            print(f"  Training: {len(train_pairs)} NC-Events ({(1-val_fraction)*100:.0f}%)")
-            print(f"  Validation: {len(val_pairs)} NC-Events ({val_fraction*100:.0f}%)")
-            
-            # Speichere Split
-            progress_tracker.save_train_val_split(train_pairs, val_pairs, 
-                                                random_seed, val_fraction)
-            
-            return val_pairs
+        print(f"Train/Val Split erstellt (Event-Level):")
+        print(f"  Events gesamt: {len(event_keys)}")
+        print(f"  Training: {len(train_event_keys)} Events → {len(train_triplets)} NC-Events")
+        print(f"  Validation: {len(event_keys) - len(train_event_keys)} Events → {len(val_triplets)} NC-Events")
+        print(f"  Tatsächlicher Val-Anteil: {len(val_triplets)/(len(train_triplets)+len(val_triplets))*100:.1f}%")
+        
+        # Speichere Split
+        progress_tracker.save_train_val_split(train_triplets, val_triplets, 
+                                            random_seed, val_fraction)
+        
+        return val_triplets
 
 def process_files_sequentially(files, voxel_tree, voxel_data, voxel_indices, 
                              material_mapping_path, volume_mapping_path, geometry_params, 
                              output_file_train, output_file_val, weight,
-                             progress_tracker, validation_set):     
+                             progress_tracker, val_triplets):     
     """Verarbeitet Files sequenziell und schreibt nach jedem File"""
     
     remaining_files = progress_tracker.get_remaining_files(files)
@@ -1058,11 +1057,12 @@ def process_files_sequentially(files, voxel_tree, voxel_data, voxel_indices,
     for i, file_path in enumerate(remaining_files):
         print(f"\nVerarbeite File {i+1}/{len(remaining_files)}: {os.path.basename(file_path)}")
         start_time = time.time()
-        
+
+        file_idx = files.index(file_path)        
         try:
             # File verarbeiten
-            args = (file_path, voxel_tree, voxel_data, voxel_indices, 
-                   material_mapping_path, volume_mapping_path, geometry_params, validation_set)  # [GEÄNDERT] - validation_set hinzugefügt
+            args = (file_path, file_idx, voxel_tree, voxel_data, voxel_indices, 
+                   material_mapping_path, volume_mapping_path, geometry_params, val_triplets) 
             result = process_single_file(args)
 
             # Log processing params
@@ -1112,7 +1112,7 @@ def process_files_sequentially(files, voxel_tree, voxel_data, voxel_indices,
 def process_files_in_batches(files, voxel_tree, voxel_data, voxel_indices, 
                              material_mapping_path, volume_mapping_path,
                              geometry_params, output_file_train, output_file_val, 
-                             weight, progress_tracker, validation_set, batch_size=10):
+                             weight, progress_tracker, val_triplets, batch_size=10):
     """Verarbeitet Files in Batches und schreibt akkumuliert"""
     
     remaining_files = progress_tracker.get_remaining_files(files)
@@ -1138,9 +1138,12 @@ def process_files_in_batches(files, voxel_tree, voxel_data, voxel_indices,
         
         for file_path in batch_files:
             try:
-                args = (file_path, voxel_tree, voxel_data, voxel_indices,
-                       material_mapping_path, volume_mapping_path,
-                       geometry_params, validation_set)
+                file_idx = files.index(file_path)  # ← NEU
+    
+                args = (file_path, file_idx, voxel_tree, voxel_data, voxel_indices,
+                    material_mapping_path, volume_mapping_path,
+                    geometry_params, val_triplets)
+                
                 result = process_single_file(args)
                 
                 # Tracke individuelle Counts
@@ -1255,6 +1258,35 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
             else:
                 key_clean = key
             vol_map_grp.create_dataset(str(key_clean), data=int(value))
+
+        # Phi datasets pre-initialisieren (FEHLT AKTUELL!)
+        phi_columns = ["xNC_mm", "yNC_mm", "zNC_mm", "matID", "volID", "#gamma", 
+                    "E_gamma_tot_keV", "gammaE1_keV", "gammapx1", "gammapy1", "gammapz1",
+                    "gammaE2_keV", "gammapx2", "gammapy2", "gammapz2",
+                    "gammaE3_keV", "gammapx3", "gammapy3", "gammapz3",
+                    "gammaE4_keV", "gammapx4", "gammapy4", "gammapz4"]
+
+        for col_name in phi_columns:
+            phi_grp.create_dataset(
+                col_name,
+                shape=(0,),
+                maxshape=(None,),
+                dtype=np.float32,
+                chunks=True,
+                compression='gzip',
+                compression_opts=1
+            )
+
+        # Weights auch pre-initialisieren
+        out.create_dataset(
+            "weights",
+            shape=(0,),
+            maxshape=(None,),
+            dtype=np.float32,
+            chunks=True,
+            compression='gzip',
+            compression_opts=1
+        )
         
         # Voxel data UND Target datasets gleichzeitig initialisieren
         print(f"  Initialisiere {len(voxel_data)} Voxel mit Target-Datasets...")        
@@ -1413,12 +1445,9 @@ def main():
         progress_tracker = ProgressTracker(args.output, output_file_train, output_file_val)
 
     # Train/Val Split erstellen
-    all_nc_pairs = collect_all_nc_pairs(files)
-    val_pairs = create_or_load_train_val_split(
-        progress_tracker, 
-        all_nc_pairs, 
-        args.val_fraction, 
-        args.random_seed
+    all_nc_triplets = collect_all_nc_triplets(files)
+    val_triplets = create_or_load_train_val_split(
+        progress_tracker, all_nc_triplets, args.val_fraction, args.random_seed
     )
     
     # Alle Materialien sammeln (nur bei Reset oder wenn noch keine Output-Datei existiert)
@@ -1473,7 +1502,7 @@ def main():
             files, voxel_tree, voxel_data, voxel_indices,
             args.material_mapping, args.volume_mapping,
             geometry_params, output_file_train, output_file_val, 
-            weight, progress_tracker, val_pairs, batch_size=20
+            weight, progress_tracker, val_triplets, batch_size=20
         )
     except KeyboardInterrupt:
         print(f"\nVerarbeitung durch Benutzer unterbrochen.")
@@ -1488,7 +1517,7 @@ def main():
     total_time = time.time() - start_time
     
     print(f"\n" + "="*60)
-    print(f"VERARBEITUNG ABGESCHLOSSEN!")
+    print(f"VERARBEITUNG ABGESCHLOSSEN NACH: ", total_time)
     print(f"="*60)
     print(f"Erfolgreich verarbeitete Files: {final_stats['completed']}/{len(files)}")
     print(f"Fehlgeschlagene Files: {final_stats['failed']}")
