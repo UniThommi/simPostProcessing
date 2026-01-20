@@ -514,15 +514,18 @@ def process_single_file(args):
     
     # Geometrie-Parameter entpacken
     h_zylinder = geometry_params['h_zylinder']
+    r_zylinder = geometry_params['r_zylinder']
     valid_detectors = geometry_params.get('valid_detectors', [1965, 1966, 1967, 1968])
     
     print(f"Worker {mp.current_process().pid}: Verarbeite {os.path.basename(file_path)}")
     # print_memory_usage("Start Worker")
     
     phi_data_train = []     
-    target_data_train = []  
+    target_data_train = []
+    target_regions_train = []  
     phi_data_val = []      
-    target_data_val = []   
+    target_data_val = []
+    target_regions_val = []
     unassigned_count = 0
 
     # Anpassbare Chunk-Größe basierend auf verfügbarem Speicher
@@ -789,15 +792,58 @@ def process_single_file(args):
                 e, px, py, pz = 0.0, 0.0, 0.0, 0.0
             gamma_row.extend([e, px, py, pz])
         
-        phi_row = [x, y, z, mat_id, vol_id, n_gamma, e_tot] + gamma_row
+        # Zylinderkoordinaten der NC-Position
+        r_NC = np.sqrt(x**2 + y**2)
+        phi_NC = np.arctan2(y, x)
+        
+        # Signed distances (negativ außen, in mm)
+        dist_to_wall = r_zylinder - r_NC  # positiv innen
+        dist_to_bot = z - z_cut_bot       # positiv über Boden
+        dist_to_top = z_cut_top - z       # positiv unter Decke
+        
+        # Gamma-Impulse in Zylinderkoordinaten
+        p_r_values = []
+        p_z_values = []
+        for i in range(4):
+            e = nc_info['gamma_energies'][i]
+            if e > 0:
+                px = nc_info['gamma_px'][i]
+                py = nc_info['gamma_py'][i]
+                pz = nc_info['gamma_pz'][i]
+                p_r_values.append(np.sqrt(px**2 + py**2))
+                p_z_values.append(pz)
+        
+        # Mittlere Gamma-Richtung (nur für E > 0)
+        p_mean_r = np.mean(p_r_values) if p_r_values else 0.0
+        p_mean_z = np.mean(p_z_values) if p_z_values else 0.0
+        
+        phi_row = [x, y, z, mat_id, vol_id, n_gamma, e_tot, 
+                   r_NC, phi_NC, dist_to_wall, dist_to_bot, dist_to_top,
+                   p_mean_r, p_mean_z] + gamma_row
+        
         target_row = [voxel_counter.get(str(voxel_idx), 0) for voxel_idx in voxel_indices]
+        
+        # Target Regions: Hits pro Region (pit, bot, wall, top)
+        region_hits = {'pit': 0, 'bot': 0, 'wall': 0, 'top': 0}
+        for voxel_idx_str, count in voxel_counter.items():
+            # Finde Voxel-Layer aus voxel_data
+            voxel_info = next((v for v in voxel_data if str(v['index']) == voxel_idx_str), None)
+            if voxel_info and 'layer' in voxel_info:
+                layer = voxel_info['layer'].lower()  # Normalisiere zu lowercase
+                if layer in region_hits:
+                    region_hits[layer] += count
+        
+        target_regions_row = [region_hits['pit'], region_hits['bot'], 
+                             region_hits['wall'], region_hits['top']]
         
         if (file_idx, e_id, nc_id) in val_triplets:
             phi_data_val.append(phi_row)
             target_data_val.append(target_row)
+            target_regions_val.append(target_regions_row)
         else:
             phi_data_train.append(phi_row)
             target_data_train.append(target_row)
+            target_regions_train.append(target_regions_row)
     
     # print_memory_usage("Worker Ende")
 
@@ -821,8 +867,10 @@ def process_single_file(args):
     return {
         'phi_data_train': np.array(phi_data_train, dtype=np.float32) if phi_data_train else np.array([]),
         'target_data_train': np.array(target_data_train, dtype=np.int32) if target_data_train else np.array([]),
+        'target_regions_train': np.array(target_regions_train, dtype=np.int32) if target_regions_train else np.array([]),
         'phi_data_val': np.array(phi_data_val, dtype=np.float32) if phi_data_val else np.array([]),      
         'target_data_val': np.array(target_data_val, dtype=np.int32) if target_data_val else np.array([]),
+        'target_regions_val': np.array(target_regions_val, dtype=np.int32) if target_regions_val else np.array([]),
         'unassigned_count': unassigned_count,
         'orphaned_photons': orphaned_photons,
         'file_processed': os.path.basename(file_path)
@@ -834,7 +882,9 @@ def append_results_to_hdf5(output_file, result_data, voxel_indices, weight, data
     if len(result_data) == 0:
         return 0
     
-    phi_columns = ["xNC_mm", "yNC_mm", "zNC_mm", "matID", "volID", "#gamma", "E_gamma_tot_keV", 
+    phi_columns = ["xNC_mm", "yNC_mm", "zNC_mm", "matID", "volID", "#gamma", "E_gamma_tot_keV",
+                   "r_NC_mm", "phi_NC_rad", "dist_to_wall_mm", "dist_to_bot_mm", "dist_to_top_mm",
+                   "p_mean_r", "p_mean_z",
                    "gammaE1_keV", "gammapx1", "gammapy1", "gammapz1",
                    "gammaE2_keV", "gammapx2", "gammapy2", "gammapz2",
                    "gammaE3_keV", "gammapx3", "gammapy3", "gammapz3",
@@ -842,6 +892,7 @@ def append_results_to_hdf5(output_file, result_data, voxel_indices, weight, data
 
     phi_data = result_data['phi_data']      
     target_data = result_data['target_data']
+    target_regions_data = result_data.get('target_regions')
     num_entries = len(phi_data)
     
     if num_entries == 0:
@@ -852,6 +903,7 @@ def append_results_to_hdf5(output_file, result_data, voxel_indices, weight, data
     with h5py.File(output_file, 'a') as out:
         phi_grp = out['phi']
         target_grp = out['target']
+        target_regions_grp = out.get('target_regions')
         
         # Für phi data: entweder erweitern oder neu erstellen
         for i, col_name in enumerate(phi_columns):
@@ -890,6 +942,25 @@ def append_results_to_hdf5(output_file, result_data, voxel_indices, weight, data
             # Resize and write new data
             dset.resize((new_size,))
             dset[old_size:new_size] = target_data[:, i]
+        
+        # Target Regions erweitern
+        if target_regions_data is not None and len(target_regions_data) > 0:
+            if target_regions_grp is None:
+                # Erstelle Gruppe falls nicht vorhanden
+                target_regions_grp = out.create_group('target_regions')
+            
+            region_names = ['pit', 'bot', 'wall', 'top']
+            for i, region_name in enumerate(region_names):
+                if region_name in target_regions_grp:
+                    dset = target_regions_grp[region_name]
+                    old_size = dset.shape[0]
+                    new_size = old_size + num_entries
+                    dset.resize((new_size,))
+                    dset[old_size:new_size] = target_regions_data[:, i]
+                else:
+                    raise RuntimeError(
+                        f"Target regions dataset '{region_name}' should exist after initialization!"
+                    )
         
         # Weights erweitern oder neu erstellen
         if "weights" in out:
@@ -1132,8 +1203,10 @@ def process_files_in_batches(files, voxel_tree, voxel_data, voxel_indices,
         # Akkumulatoren für Batch
         batch_phi_train = []
         batch_target_train = []
+        batch_target_regions_train = []
         batch_phi_val = []
         batch_target_val = []
+        batch_target_regions_val = []
         file_stats = {}
         
         for file_path in batch_files:
@@ -1159,10 +1232,12 @@ def process_files_in_batches(files, voxel_tree, voxel_data, voxel_indices,
                 if train_count > 0:
                     batch_phi_train.append(result['phi_data_train'])
                     batch_target_train.append(result['target_data_train'])
+                    batch_target_regions_train.append(result['target_regions_train'])
                 
                 if val_count > 0:
                     batch_phi_val.append(result['phi_data_val'])
                     batch_target_val.append(result['target_data_val'])
+                    batch_target_regions_val.append(result['target_regions_val'])
                 
                 print(f"  ✓ {os.path.basename(file_path)} (Train: {train_count}, Val: {val_count})")
                                 
@@ -1175,9 +1250,11 @@ def process_files_in_batches(files, voxel_tree, voxel_data, voxel_indices,
         if batch_phi_train:
             combined_phi_train = np.vstack(batch_phi_train)
             combined_target_train = np.vstack(batch_target_train)
+            combined_target_regions_train = np.vstack(batch_target_regions_train)
             entries_train = append_results_to_hdf5(
                 output_file_train,
-                {'phi_data': combined_phi_train, 'target_data': combined_target_train},
+                {'phi_data': combined_phi_train, 'target_data': combined_target_train, 
+                 'target_regions': combined_target_regions_train},
                 voxel_indices, weight, 'train'
             )
             print(f"  Batch Train geschrieben: {entries_train} Einträge")
@@ -1185,9 +1262,11 @@ def process_files_in_batches(files, voxel_tree, voxel_data, voxel_indices,
         if batch_phi_val:
             combined_phi_val = np.vstack(batch_phi_val)
             combined_target_val = np.vstack(batch_target_val)
+            combined_target_regions_val = np.vstack(batch_target_regions_val)
             entries_val = append_results_to_hdf5(
                 output_file_val,
-                {'phi_data': combined_phi_val, 'target_data': combined_target_val},
+                {'phi_data': combined_phi_val, 'target_data': combined_target_val,
+                 'target_regions': combined_target_regions_val},
                 voxel_indices, weight, 'val'
             )
             print(f"  Batch Val geschrieben: {entries_val} Einträge")
@@ -1207,7 +1286,9 @@ def process_files_in_batches(files, voxel_tree, voxel_data, voxel_indices,
         progress_tracker.verify_hdf5_integrity(output_file_val)
         
         # Speicher freigeben
-        del batch_phi_train, batch_target_train, batch_phi_val, batch_target_val
+        del batch_phi_train, batch_target_train, batch_target_regions_train
+        del batch_phi_val, batch_target_val, batch_target_regions_val
+        del result
         gc.collect()
 
 
@@ -1223,7 +1304,7 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
         try:
             with h5py.File(output_file, 'r') as f:
                 # Prüfen ob Grundstruktur vorhanden
-                if 'phi' in f and 'target' in f and 'voxels' in f:
+                if 'phi' in f and 'target' in f and 'voxels' in f and 'voxel_metadata' in f:
                     print(f"Bestehende Output-Datei gefunden: {output_file}")
                     return output_file
         except:
@@ -1236,6 +1317,7 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
         # Gruppen erstellen
         phi_grp = out.create_group("phi")
         target_grp = out.create_group("target")
+        target_regions_grp = out.create_group("target_regions")
         theta_grp = out.create_group("theta")
         mat_map_grp = out.create_group("mat_map")
         vol_map_grp = out.create_group("vol_map")
@@ -1248,20 +1330,20 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
         # Material mapping
         for key, value in mat_map.items():
             if key == "":
-                key = "no_material"
+                key = "noMaterial"
             mat_map_grp.create_dataset(str(key), data=int(value))
 
         # Volume mapping
         for key, value in vol_map.items():
             if key == "":
-                key_clean = "noVolume"
-            else:
-                key_clean = key
-            vol_map_grp.create_dataset(str(key_clean), data=int(value))
+                key = "noVolume"
+            vol_map_grp.create_dataset(str(key), data=int(value))
 
         # Phi datasets pre-initialisieren (FEHLT AKTUELL!)
-        phi_columns = ["xNC_mm", "yNC_mm", "zNC_mm", "matID", "volID", "#gamma", 
-                    "E_gamma_tot_keV", "gammaE1_keV", "gammapx1", "gammapy1", "gammapz1",
+        phi_columns = ["xNC_mm", "yNC_mm", "zNC_mm", "matID", "volID", "#gamma", "E_gamma_tot_keV",
+                   "r_NC_mm", "phi_NC_rad", "dist_to_wall_mm", "dist_to_bot_mm", "dist_to_top_mm",
+                   "p_mean_r", "p_mean_z",
+                   "gammaE1_keV", "gammapx1", "gammapy1", "gammapz1",
                     "gammaE2_keV", "gammapx2", "gammapy2", "gammapz2",
                     "gammaE3_keV", "gammapx3", "gammapy3", "gammapz3",
                     "gammaE4_keV", "gammapx4", "gammapy4", "gammapz4"]
@@ -1272,6 +1354,19 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
                 shape=(0,),
                 maxshape=(None,),
                 dtype=np.float32,
+                chunks=True,
+                compression='gzip',
+                compression_opts=1
+            )
+
+        # Target Regions initialisieren (pit, bot, wall, top)
+        region_names = ['pit', 'bot', 'wall', 'top']
+        for region_name in region_names:
+            target_regions_grp.create_dataset(
+                region_name,
+                shape=(0,),
+                maxshape=(None,),
+                dtype=np.int32,
                 chunks=True,
                 compression='gzip',
                 compression_opts=1
@@ -1318,6 +1413,44 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
                 )
         
         print(f"  ✓ Alle {len(voxel_data)} Voxel-Datasets erstellt")
+        
+        # Voxel Metadata erstellen (konstant, shape: (N_voxels, 7))
+        print(f"  Erstelle Voxel Metadata...")
+        voxel_metadata = []
+        
+        for voxel in voxel_data:
+            voxel_idx = voxel['index']
+            center = np.array(voxel['center'], dtype=np.float32)
+            layer = voxel.get('layer', '').lower()
+            
+            # Zylinderkoordinaten des Voxel-Centers
+            r_voxel = np.sqrt(center[0]**2 + center[1]**2)
+            phi_voxel = np.arctan2(center[1], center[0])
+            z_voxel = center[2]
+            
+            # One-Hot Encoding für Regionen
+            is_pit = 1.0 if layer == 'pit' else 0.0
+            is_bot = 1.0 if layer == 'bot' else 0.0
+            is_wall = 1.0 if layer == 'wall' else 0.0
+            is_top = 1.0 if layer == 'top' else 0.0
+            
+            # z wird ohne Offset gespeichert, Normierung im DataLoader
+            
+            voxel_metadata.append([is_pit, is_bot, is_wall, is_top, 
+                                  r_voxel, phi_voxel, z_voxel])
+        
+        voxel_metadata = np.array(voxel_metadata, dtype=np.float32)
+        
+        # Speichere Voxel Metadata (konstant für alle Events)
+        out.create_dataset(
+            "voxel_metadata",
+            data=voxel_metadata,
+            dtype=np.float32,
+            compression='gzip',
+            compression_opts=1
+        )
+        
+        print(f"  ✓ Voxel Metadata erstellt: Shape {voxel_metadata.shape}")
     
     return output_file
 
@@ -1480,6 +1613,7 @@ def main():
     # Geometrie-Parameter für Worker
     geometry_params = {
         'h_zylinder': h_zylinder,
+        'r_zylinder': r_zylinder,
         'valid_detectors': valid_detectors
     }
     
