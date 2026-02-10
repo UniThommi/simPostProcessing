@@ -563,7 +563,7 @@ def process_single_file(args):
             gamma_data_nc[f'gamma{i}_px'] = f['hit']['MyNeutronCaptureOutput'][f'gamma{i}_px']['pages'][:]
             gamma_data_nc[f'gamma{i}_py'] = f['hit']['MyNeutronCaptureOutput'][f'gamma{i}_py']['pages'][:]
             gamma_data_nc[f'gamma{i}_pz'] = f['hit']['MyNeutronCaptureOutput'][f'gamma{i}_pz']['pages'][:]
-            gamma_data_nc[f'gamma{i}_E'] = f['hit']['MyNeutronCaptureOutput'][f'gamma{i}_E']['pages'][:]
+            gamma_data_nc[f'gamma{i}_E_in_keV'] = f['hit']['MyNeutronCaptureOutput'][f'gamma{i}_E_in_keV']['pages'][:]
       
         # Umwandlung von lokalen zu globalen Mappings
         ##############################################
@@ -594,7 +594,7 @@ def process_single_file(args):
                 'gamma_tot_energy': gamma_tot_energy[idx],
                 'material_id': globalMaterialIDs[idx],
                 'volume_id': globalVolumeIDs[idx],
-                'gamma_energies': [gamma_data_nc[f'gamma{i}_E'][idx] for i in range(1, 5)],
+                'gamma_energies': [gamma_data_nc[f'gamma{i}_E_in_keV'][idx] for i in range(1, 5)],
                 'gamma_px': [gamma_data_nc[f'gamma{i}_px'][idx] for i in range(1, 5)],
                 'gamma_py': [gamma_data_nc[f'gamma{i}_py'][idx] for i in range(1, 5)],
                 'gamma_pz': [gamma_data_nc[f'gamma{i}_pz'][idx] for i in range(1, 5)]

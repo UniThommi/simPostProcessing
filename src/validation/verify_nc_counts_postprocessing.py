@@ -5,9 +5,6 @@ Neutron Capture Count Verification Script
 Vergleicht die Anzahl der Neutron Captures zwischen:
 1. Raw simulation data (input files)
 2. Postprocessed ML format data (train + validation files)
-
-Autorin: Scientific Data Pipeline Verification
-Datum: 2026-01-02
 """
 
 import os
