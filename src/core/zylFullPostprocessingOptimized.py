@@ -640,7 +640,6 @@ def process_single_file(args):
             
             photon_evtid_chunk = f['hit']['optical']['evtid']['pages'][chunk_start:chunk_end]
             photon_nC_id_chunk = f['hit']['optical']['nC_track_id']['pages'][chunk_start:chunk_end]
-            photon_gamma_energies_chunk = f['hit']['optical']['photon_gamma_kinetic_energy_in_keV']['pages'][chunk_start:chunk_end]
             photon_det_uid_chunk = f['hit']['optical']['det_uid']['pages'][chunk_start:chunk_end]
             photon_time_chunk = f['hit']['optical']['time_in_ns']['pages'][chunk_start:chunk_end]
 
@@ -659,7 +658,6 @@ def process_single_file(args):
             pz_chunk = pz_chunk[detector_mask]
             photon_evtid_chunk = photon_evtid_chunk[detector_mask]
             photon_nC_id_chunk = photon_nC_id_chunk[detector_mask]
-            photon_gamma_energies_chunk = photon_gamma_energies_chunk[detector_mask]
             photon_time_chunk = photon_time_chunk[detector_mask]
 
             # Erstelle Lookup-Array für NC-Zeiten (vektorisiert)
@@ -692,7 +690,6 @@ def process_single_file(args):
             pz_chunk = pz_chunk[time_mask]
             photon_evtid_chunk = photon_evtid_chunk[time_mask]
             photon_nC_id_chunk = photon_nC_id_chunk[time_mask]
-            photon_gamma_energies_chunk = photon_gamma_energies_chunk[time_mask]
             photon_time_chunk = photon_time_chunk[time_mask]  # Optional, falls später noch benötigt
         
             # Momentum filtering für diesen Chunk
@@ -723,11 +720,10 @@ def process_single_file(args):
             z_filtered = z_chunk[final_mask]
             photon_evtid_filtered = photon_evtid_chunk[final_mask]
             photon_nC_id_filtered = photon_nC_id_chunk[final_mask]
-            photon_gamma_energies_filtered = photon_gamma_energies_chunk[final_mask]
             
             # Nicht mehr benötigte Arrays löschen
             del x_chunk, y_chunk, z_chunk, px_chunk, py_chunk, pz_chunk
-            del photon_evtid_chunk, photon_nC_id_chunk, photon_gamma_energies_chunk
+            del photon_evtid_chunk, photon_nC_id_chunk
             del detector_mask, time_mask, photon_time_chunk
             del mask_bot, mask_top, mask_barrel, mask_bot_valid, mask_top_valid, mask_barrel_valid, final_mask
             gc.collect()
@@ -756,7 +752,7 @@ def process_single_file(args):
             
             # Chunk-Daten explizit löschen
             del x_filtered, y_filtered, z_filtered
-            del photon_evtid_filtered, photon_nC_id_filtered, photon_gamma_energies_filtered
+            del photon_evtid_filtered, photon_nC_id_filtered
             del photon_groups
             
             # print_memory_usage(f"Chunk {chunk_idx + 1} Ende")
