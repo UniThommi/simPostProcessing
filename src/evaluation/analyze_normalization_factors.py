@@ -93,8 +93,8 @@ def analyze_hdf5_structure(
         results['target_regions'] = region_stats
         results['target_regions_sum'] = sum_stats
         
-        # === 3. INDIVIDUAL TARGETS (Voxel-weise) ===
-        print("\n[3/3] Analysiere individual targets (Voxel)...")
+        # # === 3. INDIVIDUAL TARGETS (Voxel-weise) ===
+        # print("\n[3/3] Analysiere individual targets (Voxel)...")
         target_group = f['target']
         target_keys = list(target_group.keys())
         n_targets = len(target_keys)
@@ -123,6 +123,38 @@ def analyze_hdf5_structure(
             'min_over_all_voxels': int(global_target_min),
             'max_over_all_voxels': int(global_target_max),
             'n_voxels': n_targets
+        }
+
+        # === 4. VOXEL HIT MULTIPLICITY PRO EVENT ===
+        print("\n[4/4] Analysiere Voxel-Hit-Multiplizität pro Event...")
+        
+        global_min_hits = np.inf
+        global_max_hits = -np.inf
+        total_hits = 0
+        
+        for start_idx in range(0, n_events, chunk_size):
+            end_idx = min(start_idx + chunk_size, n_events)
+            
+            # Lade alle Voxel als 2D-Array → (n_voxels, chunk_len)
+            stacked = np.stack(
+                [target_group[k][start_idx:end_idx] for k in target_keys],
+                axis=0
+            )
+            # Hits pro Event: Anzahl Voxel mit >0 Photonen → (chunk_len,)
+            hit_counts = np.count_nonzero(stacked, axis=0)
+            
+            global_min_hits = min(global_min_hits, int(hit_counts.min()))
+            global_max_hits = max(global_max_hits, int(hit_counts.max()))
+            total_hits += int(hit_counts.sum())
+            
+            if (start_idx // chunk_size + 1) % 5 == 0:
+                print(f"  Chunk {start_idx//chunk_size + 1}/{(n_events-1)//chunk_size + 1}")
+        
+        results['voxel_hit_multiplicity'] = {
+            'min_hits_per_event': int(global_min_hits),
+            'max_hits_per_event': int(global_max_hits),
+            'mean_hits_per_event': round(total_hits / n_events, 2),
+            'n_voxels_total': n_targets
         }
     
     # === EXPORT TO JSON ===
@@ -166,6 +198,13 @@ def print_summary(results: Dict[str, Any]) -> None:
     print(f"  Max über alle Voxel   : {t['max_over_all_voxels']:6d}")
     print(f"  Anzahl Voxel          : {t['n_voxels']:6d}")
     print("="*60)
+
+    print("\n[VOXEL HIT MULTIPLICITY (Voxel mit >0 Photonen pro Event)]")
+    h = results['voxel_hit_multiplicity']
+    print(f"  Min Hits/Event        : {h['min_hits_per_event']:6d}")
+    print(f"  Max Hits/Event        : {h['max_hits_per_event']:6d}")
+    print(f"  Mean Hits/Event       : {h['mean_hits_per_event']:10.2f}")
+    print(f"  Voxel gesamt          : {h['n_voxels_total']:6d}")
 
 
 # === HAUPTAUSFÜHRUNG ===

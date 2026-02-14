@@ -231,6 +231,10 @@ class ProgressTracker:
             'total_unassigned': self.progress_data['total_unassigned'],
             'elapsed_time': time.time() - self.progress_data['start_time']
         }
+    
+# ============================================================================
+# Mapping Functions
+# ============================================================================
 
 def loadMapping(filePath):
     with open(filePath, 'r') as f:
@@ -257,7 +261,7 @@ def remapMaterialIDsToGlobal(
     unique_local_ids = np.unique(local_material_ids)
     mapping_dict = {}
 
-    # CHANGED: Nur mappen, NICHT erweitern!
+    # Nur mappen, NICHT erweitern!
     for local_id in unique_local_ids:
         local_name = local_mat_map[local_id]
         
@@ -274,7 +278,7 @@ def remapMaterialIDsToGlobal(
     vectorized_mapper = np.vectorize(mapping_dict.get)
     global_material_ids = vectorized_mapper(local_material_ids)
 
-    return global_material_ids, globMaterialMapping  # Mapping unverändert zurückgeben
+    return global_material_ids, globMaterialMapping # unverändert
 
 def remapVolumeIDsToGlobal(
     glob_mapping_json_path: str,
@@ -409,6 +413,10 @@ def collect_all_volumes_first(files):
     
     return all_volumes
 
+# ============================================================================
+# File Discovery
+# ============================================================================
+
 def find_all_hdf5_files(input_path, nested):
     """Findet alle HDF5-Dateien entweder direkt oder in Unterordnern"""
     files = []
@@ -427,6 +435,10 @@ def find_all_hdf5_files(input_path, nested):
         files = sorted(glob.glob(os.path.join(input_path, 'output_*.hdf5')))
     
     return files
+
+# ============================================================================
+# Geometry & Voxel Functions (identisch zum Single-Sim Script)
+# ============================================================================
 
 def checkRadialMomentumVectorized(x, y, z, px, py, pz):
     """Vectorized radial momentum calculation"""

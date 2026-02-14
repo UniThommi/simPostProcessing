@@ -6,3 +6,4 @@ data/processed/
 .vscode
 *.png
 *.txt
+analysis_results*
