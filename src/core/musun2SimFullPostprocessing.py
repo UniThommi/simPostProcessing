@@ -639,9 +639,9 @@ def load_all_nc_data_from_sim1(
 
                 nc_evtid = nc_out['evtid']['pages'][:]
                 nc_nC_id = nc_out['nC_track_id']['pages'][:]
-                nC_x = nc_out['nC_x_position_in_m']['pages'][:]
-                nC_y = nc_out['nC_y_position_in_m']['pages'][:]
-                nC_z = nc_out['nC_z_position_in_m']['pages'][:]
+                nC_x = nc_out['nC_x_position_in_m']['pages'][:] * 1000  # mm
+                nC_y = nc_out['nC_y_position_in_m']['pages'][:] * 1000  # mm
+                nC_z = nc_out['nC_z_position_in_m']['pages'][:] * 1000  # mm
                 gamma_amount = nc_out['nC_gamma_amount']['pages'][:]
                 gamma_tot_energy = nc_out['nC_gamma_total_energy_in_keV']['pages'][:]
                 nc_material_ids = nc_out['nC_material_id']['pages'][:]
