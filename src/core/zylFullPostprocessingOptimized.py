@@ -560,9 +560,9 @@ def process_single_file(args):
         ##############################################
         nc_evtid = f['hit']['MyNeutronCaptureOutput']['evtid']['pages'][:]
         nc_nC_id = f['hit']['MyNeutronCaptureOutput']['nC_track_id']['pages'][:]
-        nC_x = f['hit']['MyNeutronCaptureOutput']['nC_x_position_in_m']['pages'][:]
-        nC_y = f['hit']['MyNeutronCaptureOutput']['nC_y_position_in_m']['pages'][:]
-        nC_z = f['hit']['MyNeutronCaptureOutput']['nC_z_position_in_m']['pages'][:]
+        nC_x = f['hit']['MyNeutronCaptureOutput']['nC_x_position_in_m']['pages'][:] * 1000  # mm
+        nC_y = f['hit']['MyNeutronCaptureOutput']['nC_y_position_in_m']['pages'][:] * 1000
+        nC_z = f['hit']['MyNeutronCaptureOutput']['nC_z_position_in_m']['pages'][:] * 1000
         gamma_amount = f['hit']['MyNeutronCaptureOutput']['nC_gamma_amount']['pages'][:]
         gamma_tot_energy = f['hit']['MyNeutronCaptureOutput']['nC_gamma_total_energy_in_keV']['pages'][:]
         nc_material_ids = f['hit']['MyNeutronCaptureOutput']['nC_material_id']['pages'][:]
@@ -1513,6 +1513,8 @@ Beispiele:
                         help='Anteil der Daten für Validation (default: 0.2 = 20%%)')
     parser.add_argument('--random-seed', type=int, default=42,
                         help='Random Seed für reproduzierbaren Train/Val Split (default: 42)')
+    parser.add_argument('--no-split', action='store_true',
+                        help='Kein Train/Val Split – alle Daten werden als Training geschrieben')
     
     # Zusätzliche Optionen
     parser.add_argument('-g', '--geometry', default='currentDist',
@@ -1586,10 +1588,14 @@ def main():
         progress_tracker = ProgressTracker(args.output, output_file_train, output_file_val)
 
     # Train/Val Split erstellen
-    all_nc_triplets = collect_all_nc_triplets(files)
-    val_triplets = create_or_load_train_val_split(
-        progress_tracker, all_nc_triplets, args.val_fraction, args.random_seed
-    )
+    if args.no_split:
+        print("Kein Train/Val Split – alle Daten werden als Training geschrieben.")
+        val_triplets = set()
+    else:
+        all_nc_triplets = collect_all_nc_triplets(files)
+        val_triplets = create_or_load_train_val_split(
+            progress_tracker, all_nc_triplets, args.val_fraction, args.random_seed
+        )
     
     # Alle Materialien sammeln (nur bei Reset oder wenn noch keine Output-Datei existiert)
     if not os.path.exists(output_file_train):
@@ -1665,7 +1671,9 @@ def main():
     print(f"Fehlgeschlagene Files: {final_stats['failed']}")
     print(f"Training Einträge: {final_stats['total_entries_train']}")    
     print(f"Validation Einträge: {final_stats['total_entries_val']}")    
-    print(f"Validation Anteil: {final_stats['total_entries_val']/(final_stats['total_entries_train']+final_stats['total_entries_val'])*100:.1f}%") 
+    total_entries = final_stats['total_entries_train'] + final_stats['total_entries_val']
+    val_pct = (final_stats['total_entries_val'] / total_entries * 100) if total_entries > 0 else 0.0
+    print(f"Validation Anteil: {val_pct:.1f}%")
     print(f"Nicht zugeordnete Punkte: {final_stats['total_unassigned']}")
     print(f"Gesamtlaufzeit: {final_stats['elapsed_time']/60:.1f} min")
     print(f"Durchschnitt pro File: {final_stats['elapsed_time']/max(1,final_stats['completed']):.2f}s")
