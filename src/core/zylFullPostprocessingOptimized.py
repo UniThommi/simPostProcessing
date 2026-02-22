@@ -1305,7 +1305,7 @@ def process_files_in_batches(files, voxel_tree, voxel_data, voxel_indices,
 # ----------------------------------------------------------------------------
 def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol_map, radius, suffix=""):
     """Erstellt eine neue HDF5-Datei oder öffnet eine bestehende"""
-    output_file = os.path.join(output_path, f"resum_output_{file_index}{suffix}.hdf5") 
+    output_file = os.path.join(output_path, f"ncscore_output_{file_index}{suffix}.hdf5") 
     
     # Wenn Datei bereits existiert, prüfen ob sie gültig ist
     if os.path.exists(output_file):
@@ -1469,8 +1469,8 @@ def parse_arguments():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Das Script erstellt automatisch zwei Output-Files:                            
-- resum_output_0_train.hdf5 (80% der Daten)                                   
-- resum_output_0_validation.hdf5 (20% der Daten)                              
+- ncscore_output_0_train.hdf5 (80% der Daten)                                   
+- ncscore_output_0_validation.hdf5 (20% der Daten)                              
 
 Beispiele:
   # Daten direkt im Ordner                                                    
@@ -1569,8 +1569,8 @@ def main():
     print(f"Gefunden: {len(files)} Dateien insgesamt")
 
     # Output-Datei definieren
-    output_file_train = os.path.join(args.output, "resum_output_0_train.hdf5")
-    output_file_val = os.path.join(args.output, "resum_output_0_validation.hdf5")
+    output_file_train = os.path.join(args.output, "ncscore_output_0_train.hdf5")
+    output_file_val = os.path.join(args.output, "ncscore_output_0_validation.hdf5")
     
     # Progress Tracker initialisieren
     progress_tracker = ProgressTracker(args.output, output_file_train, output_file_val)
