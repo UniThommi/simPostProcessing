@@ -1321,7 +1321,7 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
     
     # Neue Datei erstellen
     print(f"Erstelle neue Output-Datei: {output_file}")
-    with h5py.File(output_file, 'w') as out:
+    with h5py.File(output_file, 'w', libver="latest") as out:
         # Gruppen erstellen
         phi_grp = out.create_group("phi")
         target_grp = out.create_group("target")

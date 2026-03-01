@@ -30,7 +30,6 @@ import json
 import h5py
 import sys
 import numpy as np
-import pandas as pd
 from collections import defaultdict, Counter
 from scipy.spatial import KDTree
 import multiprocessing as mp
@@ -403,13 +402,40 @@ def find_all_hdf5_files(input_path: str, nested: bool) -> list[str]:
     return files
 
 
-def find_sim2_files(sim2_path: str) -> list[str]:
-    """Findet alle HDF5-Dateien der zweiten Simulation (output_t*.hdf5)"""
-    files = sorted(glob.glob(os.path.join(sim2_path, 'output_t*.hdf5')))
-    if not files:
-        # Fallback: auch output_*.hdf5 suchen
-        files = sorted(glob.glob(os.path.join(sim2_path, 'output_*.hdf5')))
-    return files
+def find_sim2_files(sim2_path: str, nested: bool = False) -> dict[int, list[str]]:
+    """
+    Findet Sim2 HDF5-Dateien, gruppiert nach run_id.
+
+    Returns:
+        {run_id: [file_paths...]}  bei nested=True
+        {0: [file_paths...]}      bei nested=False
+    """
+    files_by_run: dict[int, list[str]] = {}
+
+    if nested:
+        subdirs = sorted(Path(sim2_path).iterdir())
+        for subdir in subdirs:
+            if not subdir.is_dir() or not subdir.name.startswith("run_"):
+                continue
+            try:
+                run_id = int(subdir.name.split("_")[1])
+            except (IndexError, ValueError):
+                print(f"  ⚠ Kann run_id nicht aus {subdir.name} extrahieren, überspringe")
+                continue
+            run_files = sorted(glob.glob(os.path.join(subdir, 'output_t*.hdf5')))
+            if not run_files:
+                run_files = sorted(glob.glob(os.path.join(subdir, 'output_*.hdf5')))
+            if run_files:
+                files_by_run[run_id] = run_files
+                print(f"  Sim2 run_{run_id:03d}: {len(run_files)} Files")
+    else:
+        files = sorted(glob.glob(os.path.join(sim2_path, 'output_t*.hdf5')))
+        if not files:
+            files = sorted(glob.glob(os.path.join(sim2_path, 'output_*.hdf5')))
+        if files:
+            files_by_run[0] = files
+
+    return files_by_run
 
 
 # ============================================================================
@@ -600,22 +626,22 @@ def load_all_nc_data_from_sim1(
     sim1_files: list[str],
     material_mapping_path: str,
     volume_mapping_path: str,
-    muon_id_remap: Optional[dict[tuple[int, int], int]] = None,
     nested: bool = False
-) -> dict[tuple[int, int], dict]:
+) -> tuple[dict[tuple[int, int], dict], dict[tuple[int, int], int]]:
     """
     Lädt alle NC-Daten aus allen Sim1-Files.
 
     Returns:
-        nc_data_dict: {(muon_id, nC_id): {nc_info...}}
-            Schlüssel ist (remapped_muon_id, nC_track_id) wenn muon_id_remap
-            gegeben, sonst (evtid, nC_track_id).
+        nc_data_dict: {(run_id, orig_muon_id, nC_id): {nc_info...}}
+        global_muon_id_map: {(run_id, orig_muon_id): global_muon_id}
 
-    Raises:
-        RuntimeError: Bei Duplikat-Schlüsseln nach Remapping.
+    Keys sind (run_id, orig_muon_id, nC_id) um innerhalb eines Runs
+    eindeutig zu matchen.
     """
     print(f"\n=== Phase 1: Lade NC-Daten aus {len(sim1_files)} Sim1-Files ===")
     nc_data_dict = {}
+    global_muon_id_map: dict[tuple[int, int], int] = {}
+    next_global_muon_id = 0
     duplicate_count = 0
 
     def _get_run_id(file_path: str) -> int:
@@ -639,16 +665,16 @@ def load_all_nc_data_from_sim1(
 
                 nc_evtid = nc_out['evtid']['pages'][:]
                 nc_nC_id = nc_out['nC_track_id']['pages'][:]
-                nC_x = nc_out['nC_x_position_in_m']['pages'][:] * 1000  # mm
-                nC_y = nc_out['nC_y_position_in_m']['pages'][:] * 1000  # mm
-                nC_z = nc_out['nC_z_position_in_m']['pages'][:] * 1000  # mm
+                nC_x = nc_out['nC_x_position_in_m']['pages'][:] * 1000
+                nC_y = nc_out['nC_y_position_in_m']['pages'][:] * 1000
+                nC_z = nc_out['nC_z_position_in_m']['pages'][:] * 1000
                 gamma_amount = nc_out['nC_gamma_amount']['pages'][:]
                 gamma_tot_energy = nc_out['nC_gamma_total_energy_in_keV']['pages'][:]
                 nc_material_ids = nc_out['nC_material_id']['pages'][:]
                 nc_volume_ids = nc_out['nC_phys_vol_id']['pages'][:]
                 nc_time = nc_out['nC_time_in_ns']['pages'][:]
+                nc_flag_ge77 = nc_out['nC_flag_Ge77']['pages'][:]
 
-                # Gamma-Daten (1-4)
                 gamma_data_nc = {}
                 for i in range(1, 5):
                     gamma_data_nc[f'gamma{i}_px'] = nc_out[f'gamma{i}_px']['pages'][:]
@@ -656,7 +682,6 @@ def load_all_nc_data_from_sim1(
                     gamma_data_nc[f'gamma{i}_pz'] = nc_out[f'gamma{i}_pz']['pages'][:]
                     gamma_data_nc[f'gamma{i}_E_in_keV'] = nc_out[f'gamma{i}_E_in_keV']['pages'][:]
 
-                # Material-Mapping
                 mapping_names = [x.decode() for x in f["hit/materials/materialNames"]["pages"][:]]
                 mapping_ids = f["hit/materials/materialsID"]["pages"][:]
                 local_mat_map = dict(zip(mapping_ids, mapping_names))
@@ -664,7 +689,6 @@ def load_all_nc_data_from_sim1(
                     material_mapping_path, local_mat_map, nc_material_ids
                 )
 
-                # Volume-Mapping
                 volume_names = [x.decode() for x in f["hit/physVolumes/physVolumeNames"]["pages"][:]]
                 volume_ids = f["hit/physVolumes/physVolumesID"]["pages"][:]
                 local_vol_map = dict(zip(volume_ids, volume_names))
@@ -672,21 +696,17 @@ def load_all_nc_data_from_sim1(
                     volume_mapping_path, local_vol_map, nc_volume_ids
                 )
 
-                # NC-Dict aufbauen
                 for idx in range(len(nc_evtid)):
                     orig_muon_id = int(nc_evtid[idx])
                     nc_id = int(nc_nC_id[idx])
 
-                    if muon_id_remap is not None:
-                        remap_key = (run_id, orig_muon_id)
-                        if remap_key not in muon_id_remap:
-                            print(f"    ⚠ WARNUNG: ({run_id}, {orig_muon_id}) nicht im Remapping gefunden, überspringe")
-                            continue
-                        muon_id = muon_id_remap[remap_key]
-                    else:
-                        muon_id = orig_muon_id
+                    # Globale Muon-ID vergeben
+                    muon_key = (run_id, orig_muon_id)
+                    if muon_key not in global_muon_id_map:
+                        global_muon_id_map[muon_key] = next_global_muon_id
+                        next_global_muon_id += 1
 
-                    key = (muon_id, nc_id)
+                    key = (run_id, orig_muon_id, nc_id)
 
                     if key in nc_data_dict:
                         duplicate_count += 1
@@ -694,10 +714,13 @@ def load_all_nc_data_from_sim1(
 
                     nc_data_dict[key] = {
                         'file_idx': file_idx,
+                        'run_id': run_id,
+                        'global_muon_id': global_muon_id_map[muon_key],
                         'nC_x': nC_x[idx],
                         'nC_y': nC_y[idx],
                         'nC_z': nC_z[idx],
                         'nC_time': nc_time[idx],
+                        'nC_flag_Ge77': int(nc_flag_ge77[idx]),
                         'gamma_amount': gamma_amount[idx],
                         'gamma_tot_energy': gamma_tot_energy[idx],
                         'material_id': globalMaterialIDs[idx],
@@ -713,18 +736,12 @@ def load_all_nc_data_from_sim1(
             raise
 
     if duplicate_count > 0:
-        if muon_id_remap is not None:
-            raise RuntimeError(
-                f"{duplicate_count} Duplikat-(muon_id, nC_id) Paare trotz Remapping! "
-                f"Das sollte nicht passieren – prüfe merged_ncs.csv und Sim1-Daten."
-            )
-        else:
-            print(f"  ⚠ WARNUNG: {duplicate_count} Duplikat-(muon_id, nC_id) Paare über Sim1-Files hinweg!")
+        print(f"  ⚠ WARNUNG: {duplicate_count} Duplikat-(run_id, muon_id, nC_id) Triplets!")
 
     print(f"  ✓ {len(nc_data_dict)} einzigartige NC-Events geladen")
+    print(f"  ✓ {len(global_muon_id_map)} einzigartige Muonen → globale IDs 0..{next_global_muon_id - 1}")
     print_memory_usage("Nach Phase 1")
-    return nc_data_dict
-
+    return nc_data_dict, global_muon_id_map
 
 # ============================================================================
 # Phase 2: Sim2-Files sequenziell scannen und Voxel-Hits aggregieren
@@ -747,226 +764,200 @@ def get_chunk_size() -> int:
         return 5000
 
 def scan_sim2_and_aggregate(
-    sim2_files: list[str],
-    nc_data_dict: dict[tuple[int, int], dict],
+    sim2_files_by_run: dict[int, list[str]],
+    nc_data_dict: dict[tuple[int, int, int], dict],
     voxel_tree: Optional[KDTree],
     voxel_data: list[dict],
     geometry_params: dict,
-) -> tuple[dict[tuple[int, int], Counter], int, int]:
+) -> tuple[dict[tuple[int, int, int], Counter], int, int]:
     """
-    Scannt alle Sim2-Files sequenziell und aggregiert Voxel-Hits pro NC-Event.
+    Scannt Sim2-Files run-weise und aggregiert Voxel-Hits pro NC-Event.
 
-    Für jedes Sim2-File werden optische Photonen chunk-weise geladen, gefiltert
-    (Detektor, Zeitfenster, Momentum) und dem nächsten Voxel zugeordnet.
+    Matching: Innerhalb desselben run_id werden muon_id und nC_id gematcht.
 
     Args:
-        sim2_files: Liste aller Sim2 HDF5-Dateien
-        nc_data_dict: NC-Daten aus Sim1, Schlüssel (muon_id, nC_id)
-        voxel_tree: KDTree für Voxel-Zuordnung
-        voxel_data: Voxel-Definitionen
-        geometry_params: Geometrie-Parameter (h_zylinder, r_zylinder, valid_detectors)
+        sim2_files_by_run: {run_id: [file_paths...]}
+        nc_data_dict: {(run_id, orig_muon_id, nC_id): nc_info}
+        ...
 
     Returns:
-        nc_voxel_counters: {(muon_id, nC_id): Counter({voxel_idx_str: count})}
-        total_unassigned: Anzahl nicht zuordbarer Photonen
-        total_orphaned: Photonen ohne zugehöriges NC-Event
-
-    Raises:
-        RuntimeError: Falls relative Photon-Zeit negativ ist (Zeitkonsistenz-Fehler)
+        nc_voxel_counters: {(run_id, muon_id, nC_id): Counter}
+        total_unassigned, total_orphaned
     """
-    print(f"\n=== Phase 2: Scanne {len(sim2_files)} Sim2-Files für optische Photonen ===")
+    total_sim2_files = sum(len(v) for v in sim2_files_by_run.values())
+    print(f"\n=== Phase 2: Scanne {total_sim2_files} Sim2-Files über {len(sim2_files_by_run)} Runs ===")
 
     h_zylinder = geometry_params['h_zylinder']
     r_zylinder = geometry_params['r_zylinder']
     valid_detectors = geometry_params.get('valid_detectors', [1965, 1966, 1967, 1968])
     valid_detectors_array = np.array(valid_detectors, dtype=np.int32)
 
-    # Cut-Parameter (identisch zum Single-Sim Script)
     z_cut_bot = -4979
     z_cut_top = z_cut_bot + h_zylinder - 2
 
-    # Globale Akkumulatoren
-    nc_voxel_counters: dict[tuple[int, int], Counter] = defaultdict(Counter)
+    nc_voxel_counters: dict[tuple[int, int, int], Counter] = defaultdict(Counter)
     total_unassigned = 0
     total_orphaned = 0
-
-    # Lookup: NC-Zeiten als dict für schnellen Zugriff
-    nc_times_lookup: dict[tuple[int, int], float] = {
-        key: info['nC_time'] for key, info in nc_data_dict.items()
-    }
 
     CHUNK_SIZE = get_chunk_size()
     print(f"  Chunk-Size: {CHUNK_SIZE}")
 
-    for sim2_idx, sim2_file in enumerate(sim2_files):
-        print(f"  Sim2-File {sim2_idx + 1}/{len(sim2_files)}: {os.path.basename(sim2_file)}")
-        file_unassigned = 0
-        file_orphaned = 0
-        file_matched = 0
+    file_counter = 0
 
-        try:
-            with h5py.File(sim2_file, 'r') as f:
-                total_photons = len(f['hit']['optical']['x_position_in_m']['pages'])
+    for run_id in sorted(sim2_files_by_run.keys()):
+        sim2_files = sim2_files_by_run[run_id]
+        print(f"\n  --- Run {run_id}: {len(sim2_files)} Sim2-Files ---")
 
-                if total_photons == 0:
-                    print(f"    Keine optischen Photonen, überspringe.")
-                    continue
+        # NC-Zeiten-Lookup nur für diesen Run
+        nc_times_for_run: dict[tuple[int, int], float] = {
+            (muon_id, nc_id): info['nC_time']
+            for (rid, muon_id, nc_id), info in nc_data_dict.items()
+            if rid == run_id
+        }
+        nc_keys_for_run = {
+            (muon_id, nc_id)
+            for (rid, muon_id, nc_id) in nc_data_dict.keys()
+            if rid == run_id
+        }
 
-                num_chunks = (total_photons - 1) // CHUNK_SIZE + 1
+        for sim2_idx, sim2_file in enumerate(sim2_files):
+            file_counter += 1
+            print(f"    Sim2-File {sim2_idx + 1}/{len(sim2_files)} (global {file_counter}/{total_sim2_files}): {os.path.basename(sim2_file)}")
+            file_unassigned = 0
+            file_orphaned = 0
+            file_matched = 0
 
-                for chunk_idx in range(num_chunks):
-                    chunk_start = chunk_idx * CHUNK_SIZE
-                    chunk_end = min(chunk_start + CHUNK_SIZE, total_photons)
+            try:
+                with h5py.File(sim2_file, 'r') as f:
+                    total_photons = len(f['hit']['optical']['x_position_in_m']['pages'])
 
-                    # Positionen laden (m → mm)
-                    x = np.array(f['hit']['optical']['x_position_in_m']['pages'][chunk_start:chunk_end], dtype=np.float32) * 1000
-                    y = np.array(f['hit']['optical']['y_position_in_m']['pages'][chunk_start:chunk_end], dtype=np.float32) * 1000
-                    z = np.array(f['hit']['optical']['z_position_in_m']['pages'][chunk_start:chunk_end], dtype=np.float32) * 1000
-                    px = np.array(f['hit']['optical']['x_momentum_direction']['pages'][chunk_start:chunk_end], dtype=np.float32)
-                    py = np.array(f['hit']['optical']['y_momentum_direction']['pages'][chunk_start:chunk_end], dtype=np.float32)
-                    pz = np.array(f['hit']['optical']['z_momentum_direction']['pages'][chunk_start:chunk_end], dtype=np.float32)
-
-                    muon_ids = f['hit']['optical']['muon_track_id']['pages'][chunk_start:chunk_end]
-                    nc_ids = f['hit']['optical']['nC_track_id']['pages'][chunk_start:chunk_end]
-                    det_uids = f['hit']['optical']['det_uid']['pages'][chunk_start:chunk_end]
-                    photon_times = f['hit']['optical']['time_in_ns']['pages'][chunk_start:chunk_end]
-
-                    # --- Filter 1: Detektor-Filter ---
-                    det_mask = np.isin(det_uids, valid_detectors_array)
-                    x = x[det_mask]
-                    y = y[det_mask]
-                    z = z[det_mask]
-                    px = px[det_mask]
-                    py = py[det_mask]
-                    pz = pz[det_mask]
-                    muon_ids = muon_ids[det_mask]
-                    nc_ids = nc_ids[det_mask]
-                    photon_times = photon_times[det_mask]
-
-                    if len(x) == 0:
+                    if total_photons == 0:
+                        print(f"      Keine optischen Photonen, überspringe.")
                         continue
 
-                    # --- Filter 2: Zeitfenster (relativ zur NC-Zeit aus Sim1) ---
-                    nc_times_arr = np.full(len(photon_times), np.inf, dtype=np.float64)
+                    num_chunks = (total_photons - 1) // CHUNK_SIZE + 1
 
-                    for idx in range(len(muon_ids)):
-                        key = (int(muon_ids[idx]), int(nc_ids[idx]))
-                        if key in nc_times_lookup:
-                            nc_times_arr[idx] = nc_times_lookup[key]
+                    for chunk_idx in range(num_chunks):
+                        chunk_start = chunk_idx * CHUNK_SIZE
+                        chunk_end = min(chunk_start + CHUNK_SIZE, total_photons)
 
-                    # Orphaned: Photonen ohne zugehöriges NC-Event
-                    has_nc = nc_times_arr != np.inf
-                    orphaned_in_chunk = np.sum(~has_nc)
-                    file_orphaned += int(orphaned_in_chunk)
+                        x = np.array(f['hit']['optical']['x_position_in_m']['pages'][chunk_start:chunk_end], dtype=np.float32) * 1000
+                        y = np.array(f['hit']['optical']['y_position_in_m']['pages'][chunk_start:chunk_end], dtype=np.float32) * 1000
+                        z = np.array(f['hit']['optical']['z_position_in_m']['pages'][chunk_start:chunk_end], dtype=np.float32) * 1000
+                        px = np.array(f['hit']['optical']['x_momentum_direction']['pages'][chunk_start:chunk_end], dtype=np.float32)
+                        py = np.array(f['hit']['optical']['y_momentum_direction']['pages'][chunk_start:chunk_end], dtype=np.float32)
+                        pz = np.array(f['hit']['optical']['z_momentum_direction']['pages'][chunk_start:chunk_end], dtype=np.float32)
 
-                    # Relative Zeit berechnen
-                    relative_times = np.where(has_nc, photon_times - nc_times_arr, np.inf)
+                        muon_ids = f['hit']['optical']['muon_track_id']['pages'][chunk_start:chunk_end]
+                        nc_ids = f['hit']['optical']['nC_track_id']['pages'][chunk_start:chunk_end]
+                        det_uids = f['hit']['optical']['det_uid']['pages'][chunk_start:chunk_end]
+                        photon_times = f['hit']['optical']['time_in_ns']['pages'][chunk_start:chunk_end]
 
-                    # CRITICAL CHECK: Negative relative Zeiten sind physikalisch unmöglich
-                    negative_mask = has_nc & (relative_times < 0)
-                    if np.any(negative_mask):
-                        neg_indices = np.where(negative_mask)[0]
-                        first_bad = neg_indices[0]
-                        bad_muon = int(muon_ids[first_bad])
-                        bad_nc = int(nc_ids[first_bad])
-                        bad_time = float(photon_times[first_bad])
-                        bad_nc_time = float(nc_times_arr[first_bad])
-                        raise RuntimeError(
-                            f"FATAL: Negative relative Photon-Zeit detektiert!\n"
-                            f"  Sim2-File: {sim2_file}\n"
-                            f"  muon_id={bad_muon}, nC_id={bad_nc}\n"
-                            f"  photon_time={bad_time:.4f} ns, nC_time={bad_nc_time:.4f} ns\n"
-                            f"  relative_time={bad_time - bad_nc_time:.4f} ns\n"
-                            f"  Dies deutet auf inkonsistente Zeitreferenzen zwischen Sim1 und Sim2 hin.\n"
-                            f"  Insgesamt {int(np.sum(negative_mask))} Photonen mit negativer relativer Zeit in diesem Chunk."
-                        )
+                        # Filter 1: Detektor
+                        det_mask = np.isin(det_uids, valid_detectors_array)
+                        x, y, z = x[det_mask], y[det_mask], z[det_mask]
+                        px, py, pz = px[det_mask], py[det_mask], pz[det_mask]
+                        muon_ids = muon_ids[det_mask]
+                        nc_ids = nc_ids[det_mask]
+                        photon_times = photon_times[det_mask]
 
-                    time_mask = has_nc & (relative_times >= 0) & (relative_times <= 200.0)
-
-                    x = x[time_mask]
-                    y = y[time_mask]
-                    z = z[time_mask]
-                    px = px[time_mask]
-                    py = py[time_mask]
-                    pz = pz[time_mask]
-                    muon_ids = muon_ids[time_mask]
-                    nc_ids = nc_ids[time_mask]
-
-                    if len(x) == 0:
-                        continue
-
-                    # --- Filter 3: Momentum-Filter ---
-                    mask_bot = z <= z_cut_bot
-                    mask_top = z >= z_cut_top
-                    mask_barrel = ~mask_bot & ~mask_top
-
-                    mask_bot_valid = pz[mask_bot] <= 0
-                    mask_top_valid = pz[mask_top] >= 0
-
-                    mask_barrel_valid = np.zeros(np.sum(mask_barrel), dtype=bool)
-                    if np.any(mask_barrel):
-                        mask_barrel_valid = checkRadialMomentumVectorized(
-                            x[mask_barrel], y[mask_barrel], z[mask_barrel],
-                            px[mask_barrel], py[mask_barrel], pz[mask_barrel]
-                        )
-
-                    final_mask = np.zeros(len(z), dtype=bool)
-                    final_mask[mask_bot] = mask_bot_valid
-                    final_mask[mask_top] = mask_top_valid
-                    final_mask[mask_barrel] = mask_barrel_valid
-
-                    x = x[final_mask]
-                    y = y[final_mask]
-                    z = z[final_mask]
-                    muon_ids = muon_ids[final_mask]
-                    nc_ids = nc_ids[final_mask]
-
-                    if len(x) == 0:
-                        continue
-
-                    file_matched += len(x)
-
-                    # --- Voxel-Zuordnung und Aggregation ---
-                    # Gruppiere nach (muon_id, nc_id) für effiziente Batch-Zuordnung
-                    photon_groups = defaultdict(list)
-                    for idx in range(len(muon_ids)):
-                        photon_groups[(int(muon_ids[idx]), int(nc_ids[idx]))].append(idx)
-
-                    for (m_id, n_id), indices in photon_groups.items():
-                        key = (m_id, n_id)
-                        if key not in nc_data_dict:
-                            # Photon gehört zu einem NC der nicht in Sim1 ist
-                            file_orphaned += len(indices)
+                        if len(x) == 0:
                             continue
 
-                        for i in indices:
-                            voxel_idx = assignToNearestVoxel(
-                                voxel_tree, voxel_data, (x[i], y[i], z[i])
+                        # Filter 2: Zeitfenster
+                        nc_times_arr = np.full(len(photon_times), np.inf, dtype=np.float64)
+                        for idx in range(len(muon_ids)):
+                            local_key = (int(muon_ids[idx]), int(nc_ids[idx]))
+                            if local_key in nc_times_for_run:
+                                nc_times_arr[idx] = nc_times_for_run[local_key]
+
+                        has_nc = nc_times_arr != np.inf
+                        file_orphaned += int(np.sum(~has_nc))
+
+                        relative_times = np.where(has_nc, photon_times - nc_times_arr, np.inf)
+
+                        negative_mask = has_nc & (relative_times < 0)
+                        if np.any(negative_mask):
+                            neg_indices = np.where(negative_mask)[0]
+                            first_bad = neg_indices[0]
+                            raise RuntimeError(
+                                f"FATAL: Negative relative Photon-Zeit detektiert!\n"
+                                f"  Sim2-File: {sim2_file}, run_id={run_id}\n"
+                                f"  muon_id={int(muon_ids[first_bad])}, nC_id={int(nc_ids[first_bad])}\n"
+                                f"  photon_time={float(photon_times[first_bad]):.4f} ns, "
+                                f"nC_time={float(nc_times_arr[first_bad]):.4f} ns\n"
+                                f"  relative_time={float(relative_times[first_bad]):.4f} ns\n"
+                                f"  {int(np.sum(negative_mask))} Photonen mit negativer relativer Zeit."
                             )
-                            if voxel_idx == "-1":
-                                file_unassigned += 1
-                            else:
-                                nc_voxel_counters[key][voxel_idx] += 1
 
-                    # Chunk-Speicher freigeben
-                    del x, y, z, px, py, pz, muon_ids, nc_ids, det_uids, photon_times
-                    gc.collect()
+                        time_mask = has_nc & (relative_times >= 0) & (relative_times <= 200.0)
+                        x, y, z = x[time_mask], y[time_mask], z[time_mask]
+                        px, py, pz = px[time_mask], py[time_mask], pz[time_mask]
+                        muon_ids = muon_ids[time_mask]
+                        nc_ids = nc_ids[time_mask]
 
-        except RuntimeError:
-            raise  # Negative-Zeit Fehler sofort weiterleiten
-        except Exception as e:
-            print(f"    FEHLER beim Verarbeiten von {sim2_file}: {e}")
-            raise
+                        if len(x) == 0:
+                            continue
 
-        total_unassigned += file_unassigned
-        total_orphaned += file_orphaned
+                        # Filter 3: Momentum
+                        mask_bot = z <= z_cut_bot
+                        mask_top = z >= z_cut_top
+                        mask_barrel = ~mask_bot & ~mask_top
 
-        print(f"    Matched: {file_matched}, Orphaned: {file_orphaned}, Unassigned: {file_unassigned}")
+                        final_mask = np.zeros(len(z), dtype=bool)
+                        final_mask[mask_bot] = pz[mask_bot] <= 0
+                        final_mask[mask_top] = pz[mask_top] >= 0
+                        if np.any(mask_barrel):
+                            final_mask[mask_barrel] = checkRadialMomentumVectorized(
+                                x[mask_barrel], y[mask_barrel], z[mask_barrel],
+                                px[mask_barrel], py[mask_barrel], pz[mask_barrel]
+                            )
 
-        if (sim2_idx + 1) % 50 == 0:
-            print_memory_usage(f"Nach {sim2_idx + 1} Sim2-Files")
+                        x, y, z = x[final_mask], y[final_mask], z[final_mask]
+                        muon_ids = muon_ids[final_mask]
+                        nc_ids = nc_ids[final_mask]
 
-    # Statistiken
+                        if len(x) == 0:
+                            continue
+
+                        file_matched += len(x)
+
+                        # Voxel-Zuordnung
+                        photon_groups = defaultdict(list)
+                        for idx in range(len(muon_ids)):
+                            photon_groups[(int(muon_ids[idx]), int(nc_ids[idx]))].append(idx)
+
+                        for (m_id, n_id), indices in photon_groups.items():
+                            full_key = (run_id, m_id, n_id)
+                            if full_key not in nc_data_dict:
+                                file_orphaned += len(indices)
+                                continue
+
+                            for i in indices:
+                                voxel_idx = assignToNearestVoxel(
+                                    voxel_tree, voxel_data, (x[i], y[i], z[i])
+                                )
+                                if voxel_idx == "-1":
+                                    file_unassigned += 1
+                                else:
+                                    nc_voxel_counters[full_key][voxel_idx] += 1
+
+                        del x, y, z, px, py, pz, muon_ids, nc_ids, det_uids, photon_times
+                        gc.collect()
+
+            except RuntimeError:
+                raise
+            except Exception as e:
+                print(f"      FEHLER beim Verarbeiten von {sim2_file}: {e}")
+                raise
+
+            total_unassigned += file_unassigned
+            total_orphaned += file_orphaned
+            print(f"      Matched: {file_matched}, Orphaned: {file_orphaned}, Unassigned: {file_unassigned}")
+
+        if file_counter % 50 == 0:
+            print_memory_usage(f"Nach {file_counter} Sim2-Files")
+
     ncs_with_photons = sum(1 for c in nc_voxel_counters.values() if c)
     ncs_without_photons = len(nc_data_dict) - ncs_with_photons
     total_hits = sum(sum(c.values()) for c in nc_voxel_counters.values())
@@ -979,8 +970,9 @@ def scan_sim2_and_aggregate(
     print(f"    Orphaned Photonen (kein NC): {total_orphaned}")
     print_memory_usage("Nach Phase 2")
 
-    return dict(nc_voxel_counters), total_unassigned, total_orphaned
+    successfully_scanned_runs = set(sim2_files_by_run.keys())
 
+    return dict(nc_voxel_counters), total_unassigned, total_orphaned, successfully_scanned_runs
 
 # ============================================================================
 # Phase 3: Zusammenführung und HDF5-Output
@@ -1038,7 +1030,7 @@ def write_output_in_batches(
         target_regions_batch = []
 
         for key in batch_keys:
-            muon_id, nc_id = key
+            run_id, muon_id, nc_id = key
             nc_info = nc_data_dict[key]
             voxel_counter = nc_voxel_counters.get(key, Counter())
 
@@ -1085,9 +1077,14 @@ def write_output_in_batches(
             p_mean_r = np.mean(p_r_values) if p_r_values else 0.0
             p_mean_z = np.mean(p_z_values) if p_z_values else 0.0
 
+            global_muon_id = nc_info['global_muon_id']
+            nC_time = nc_info['nC_time']
+            flag_ge77 = nc_info['nC_flag_Ge77']
+
             phi_row = [x, y, z, mat_id, vol_id, n_gamma, e_tot,
                        r_NC, phi_NC, dist_to_wall, dist_to_bot, dist_to_top,
-                       p_mean_r, p_mean_z] + gamma_row
+                       p_mean_r, p_mean_z,
+                       global_muon_id, nC_time, flag_ge77] + gamma_row
 
             target_row = [voxel_counter.get(str(voxel_idx), 0) for voxel_idx in voxel_indices]
 
@@ -1154,7 +1151,7 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
             os.remove(output_file)
 
     print(f"Erstelle neue Output-Datei: {output_file}")
-    with h5py.File(output_file, 'w') as out:
+    with h5py.File(output_file, 'w', libver="latest") as out:
         phi_grp = out.create_group("phi")
         target_grp = out.create_group("target")
         target_regions_grp = out.create_group("target_regions")
@@ -1179,6 +1176,7 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
         phi_columns = ["xNC_mm", "yNC_mm", "zNC_mm", "matID", "volID", "#gamma", "E_gamma_tot_keV",
                        "r_NC_mm", "phi_NC_rad", "dist_to_wall_mm", "dist_to_bot_mm", "dist_to_top_mm",
                        "p_mean_r", "p_mean_z",
+                       "global_muon_id", "nC_time_in_ns", "nC_flag_Ge77",
                        "gammaE1_keV", "gammapx1", "gammapy1", "gammapz1",
                        "gammaE2_keV", "gammapx2", "gammapy2", "gammapz2",
                        "gammaE3_keV", "gammapx3", "gammapy3", "gammapz3",
@@ -1267,6 +1265,7 @@ def append_results_to_hdf5(output_file, result_data, voxel_indices, weight):
     phi_columns = ["xNC_mm", "yNC_mm", "zNC_mm", "matID", "volID", "#gamma", "E_gamma_tot_keV",
                    "r_NC_mm", "phi_NC_rad", "dist_to_wall_mm", "dist_to_bot_mm", "dist_to_top_mm",
                    "p_mean_r", "p_mean_z",
+                   "global_muon_id", "nC_time_in_ns", "nC_flag_Ge77",
                    "gammaE1_keV", "gammapx1", "gammapy1", "gammapz1",
                    "gammaE2_keV", "gammapx2", "gammapy2", "gammapz2",
                    "gammaE3_keV", "gammapx3", "gammapy3", "gammapz3",
@@ -1379,10 +1378,8 @@ Beispiele:
                         help='Verarbeitung von vorne beginnen')
     parser.add_argument('--sample-weight', type=int, default=50,
                         help='Anzahl Sim1-Files für Gewichtungsberechnung (0 = alle)')
-    parser.add_argument('--nested-sim1', action='store_true',
-                        help='Suche Sim1-HDF5 in Unterordnern')
-    parser.add_argument('--merged-csv-dir', type=str, default=None,
-                        help='Pfad zum Verzeichnis mit merged_ncs.csv (für ID-Remapping bei nested Sim1)')
+    parser.add_argument('--nested', action='store_true',
+                        help='Suche HDF5-Dateien in run_*/Unterordnern (gilt für Sim1 und Sim2)')
 
     # Geometrie
     parser.add_argument('-g', '--geometry', default='currentDist',
@@ -1438,18 +1435,19 @@ def main():
     print(f"Voxel-Tree mit {len(voxel_data)} Voxeln erstellt")
 
     # Sim1-Files finden
-    sim1_files = find_all_hdf5_files(args.input_sim1, args.nested_sim1)
+    sim1_files = find_all_hdf5_files(args.input_sim1, args.nested)
     if not sim1_files:
         print(f"Fehler: Keine output_*.hdf5 Dateien in Sim1-Pfad gefunden!")
         sys.exit(1)
     print(f"Sim1: {len(sim1_files)} Dateien gefunden")
 
     # Sim2-Files finden
-    sim2_files = find_sim2_files(args.input_sim2)
-    if not sim2_files:
+    sim2_files_by_run = find_sim2_files(args.input_sim2, args.nested)
+    total_sim2_files = sum(len(v) for v in sim2_files_by_run.values())
+    if total_sim2_files == 0:
         print(f"Fehler: Keine output_t*.hdf5 Dateien in Sim2-Pfad gefunden!")
         sys.exit(1)
-    print(f"Sim2: {len(sim2_files)} Dateien gefunden")
+    print(f"Sim2: {total_sim2_files} Dateien in {len(sim2_files_by_run)} Runs gefunden")
 
     # Output-Dateien
     output_file = os.path.join(args.output, "ncscore_output_0.hdf5")
@@ -1465,28 +1463,6 @@ def main():
                 os.remove(f)
         progress_tracker.cleanup()
         progress_tracker = ProgressTracker(args.output, output_file)
-
-    # === ID-Remapping aus merged CSV laden (bei nested Sim1) ===
-    muon_id_remap = None  # {(run_id, orig_muon_id): new_muon_id}
-    if args.nested_sim1:
-        if args.merged_csv_dir is None:
-            print("Fehler: --merged-csv-dir ist erforderlich bei --nested-sim1")
-            sys.exit(1)
-        csv_path = os.path.join(args.merged_csv_dir, 'merged_ncs.csv')
-        if not os.path.exists(csv_path):
-            print(f"Fehler: merged_ncs.csv nicht gefunden: {csv_path}")
-            sys.exit(1)
-        print(f"Lade ID-Remapping aus {csv_path}...")
-        muon_id_remap = {}
-        df_remap = pd.read_csv(csv_path, usecols=['muon_id', 'run_id', 'orig_muon_id'])
-        for _, row in df_remap.iterrows():
-            key = (int(row['run_id']), int(row['orig_muon_id']))
-            new_id = int(row['muon_id'])
-            if key not in muon_id_remap:
-                muon_id_remap[key] = new_id
-        del df_remap
-        n_remapped = sum(1 for k, v in muon_id_remap.items() if k[1] != v)
-        print(f"  {len(muon_id_remap)} Einträge geladen, davon {n_remapped} remapped")
 
     # === Materialien & Volumes sammeln ===
     if not os.path.exists(output_file):
@@ -1519,15 +1495,25 @@ def main():
 
     try:
         # Phase 1: NC-Daten aus Sim1 laden
-        nc_data_dict = load_all_nc_data_from_sim1(
+        nc_data_dict, global_muon_id_map = load_all_nc_data_from_sim1(
             sim1_files, args.material_mapping, args.volume_mapping,
-            muon_id_remap=muon_id_remap, nested=args.nested_sim1
+            nested=args.nested
         )
 
         # Phase 2: Sim2-Files scannen und Voxel-Hits aggregieren
-        nc_voxel_counters, total_unassigned, total_orphaned = scan_sim2_and_aggregate(
-            sim2_files, nc_data_dict, voxel_tree, voxel_data, geometry_params
+        nc_voxel_counters, total_unassigned, total_orphaned, scanned_runs = scan_sim2_and_aggregate(
+            sim2_files_by_run, nc_data_dict, voxel_tree, voxel_data, geometry_params
         )
+
+        # NCs aus Runs ohne Sim2-Daten entfernen
+        nc_keys_before = len(nc_data_dict)
+        nc_data_dict = {
+            key: val for key, val in nc_data_dict.items()
+            if key[0] in scanned_runs
+        }
+        nc_dropped = nc_keys_before - len(nc_data_dict)
+        if nc_dropped > 0:
+            print(f"  ⚠ {nc_dropped} NC-Events aus Runs ohne Sim2-Daten entfernt")
 
         # Phase 3+4: Output-Daten batchweise erstellen und direkt in HDF5 schreiben
         output_stats = write_output_in_batches(
@@ -1538,7 +1524,7 @@ def main():
         total_entries = output_stats['total_written']
 
         # Speicher freigeben
-        del nc_data_dict, nc_voxel_counters
+        del nc_data_dict, nc_voxel_counters, global_muon_id_map
         gc.collect()
 
         progress_tracker.verify_hdf5_integrity(output_file)
@@ -1562,7 +1548,7 @@ def main():
     print(f"VERARBEITUNG ABGESCHLOSSEN")
     print(f"{'='*60}")
     print(f"Sim1-Files verarbeitet: {len(sim1_files)}")
-    print(f"Sim2-Files gescannt: {len(sim2_files)}")
+    print(f"Sim2-Files gescannt: {total_sim2_files}")
     print(f"NC-Events gesamt: {total_entries}")
     print(f"NC mit Photonen: {output_stats['nc_with_photons']}")
     print(f"NC ohne Photonen: {output_stats['nc_without_photons']}")
