@@ -195,8 +195,8 @@ class ProgressTracker:
         """Prüft ob HDF5-Datei lesbar ist"""
         try:
             with h5py.File(output_file, 'r') as f:
-                if 'phi' in f and 'xNC_mm' in f['phi']:
-                    _ = f['phi']['xNC_mm'].shape
+                if 'phi_matrix' in f and 'target_matrix' in f:
+                    _ = f['phi_matrix'].shape
                     return True
         except Exception as e:
             print(f"  WARNUNG: HDF5-Integritätsprüfung fehlgeschlagen: {e}")
@@ -1137,13 +1137,20 @@ def write_output_in_batches(
 # ============================================================================
 
 def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol_map, radius, suffix=""):
-    """Erstellt eine neue HDF5-Datei oder öffnet eine bestehende"""
+    """Erstellt eine neue HDF5-Datei oder öffnet eine bestehende.
+    
+    Konsolidiertes 2D-Format:
+      - target_matrix: (n_events, n_voxels) int32
+      - phi_matrix: (n_events, 33) float32
+      - region_matrix: (n_events, 4) int32
+      - target_columns, phi_columns, region_columns: Spalten-Metadaten
+    """
     output_file = os.path.join(output_path, f"ncscore_output_{file_index}{suffix}.hdf5")
 
     if os.path.exists(output_file):
         try:
             with h5py.File(output_file, 'r') as f:
-                if 'phi' in f and 'target' in f and 'voxels' in f and 'voxel_metadata' in f:
+                if 'phi_matrix' in f and 'target_matrix' in f and 'voxels' in f and 'voxel_metadata' in f:
                     print(f"Bestehende Output-Datei gefunden: {output_file}")
                     return output_file
         except:
@@ -1151,65 +1158,87 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
             os.remove(output_file)
 
     print(f"Erstelle neue Output-Datei: {output_file}")
-    with h5py.File(output_file, 'w', libver="latest") as out:
-        phi_grp = out.create_group("phi")
-        target_grp = out.create_group("target")
-        target_regions_grp = out.create_group("target_regions")
-        theta_grp = out.create_group("theta")
-        mat_map_grp = out.create_group("mat_map")
-        vol_map_grp = out.create_group("vol_map")
-        voxels_grp = out.create_group("voxels")
+    
+    voxel_indices = [voxel['index'] for voxel in voxel_data]
+    n_voxels = len(voxel_indices)
 
+    phi_columns = ["xNC_mm", "yNC_mm", "zNC_mm", "matID", "volID", "#gamma", "E_gamma_tot_keV",
+                   "r_NC_mm", "phi_NC_rad", "dist_to_wall_mm", "dist_to_bot_mm", "dist_to_top_mm",
+                   "p_mean_r", "p_mean_z",
+                   "global_muon_id", "nC_time_in_ns", "nC_flag_Ge77",
+                   "gammaE1_keV", "gammapx1", "gammapy1", "gammapz1",
+                   "gammaE2_keV", "gammapx2", "gammapy2", "gammapz2",
+                   "gammaE3_keV", "gammapx3", "gammapy3", "gammapz3",
+                   "gammaE4_keV", "gammapx4", "gammapy4", "gammapz4"]
+    region_columns = ['pit', 'bot', 'wall', 'top']
+
+    with h5py.File(output_file, 'w', libver="latest") as out:
+        # === Konsolidierte 2D-Datasets ===
+        out.create_dataset(
+            "target_matrix",
+            shape=(0, n_voxels),
+            maxshape=(None, n_voxels),
+            dtype=np.int32,
+            chunks=(min(1000, max(1, n_voxels)), n_voxels),
+            compression='lzf'
+        )
+        out.create_dataset(
+            "phi_matrix",
+            shape=(0, len(phi_columns)),
+            maxshape=(None, len(phi_columns)),
+            dtype=np.float32,
+            chunks=(1000, len(phi_columns)),
+            compression='lzf'
+        )
+        out.create_dataset(
+            "region_matrix",
+            shape=(0, len(region_columns)),
+            maxshape=(None, len(region_columns)),
+            dtype=np.int32,
+            chunks=(1000, len(region_columns)),
+            compression='lzf'
+        )
+
+        # === Spalten-Metadaten ===
+        dt = h5py.string_dtype(encoding='utf-8')
+        out.create_dataset("target_columns", data=[str(idx) for idx in voxel_indices], dtype=dt)
+        out.create_dataset("phi_columns", data=phi_columns, dtype=dt)
+        out.create_dataset("region_columns", data=region_columns, dtype=dt)
+
+        # === Statische Daten ===
+        theta_grp = out.create_group("theta")
         theta_grp.create_dataset("inner_radius_in_mm", data=radius)
         out.create_dataset("primaries", data=0)
 
+        mat_map_grp = out.create_group("mat_map")
         for key, value in mat_map.items():
             if key == "":
                 key = "noMaterial"
             mat_map_grp.create_dataset(str(key), data=int(value))
 
+        vol_map_grp = out.create_group("vol_map")
         for key, value in vol_map.items():
             if key == "":
                 key = "noVolume"
             vol_map_grp.create_dataset(str(key), data=int(value))
 
-        phi_columns = ["xNC_mm", "yNC_mm", "zNC_mm", "matID", "volID", "#gamma", "E_gamma_tot_keV",
-                       "r_NC_mm", "phi_NC_rad", "dist_to_wall_mm", "dist_to_bot_mm", "dist_to_top_mm",
-                       "p_mean_r", "p_mean_z",
-                       "global_muon_id", "nC_time_in_ns", "nC_flag_Ge77",
-                       "gammaE1_keV", "gammapx1", "gammapy1", "gammapz1",
-                       "gammaE2_keV", "gammapx2", "gammapy2", "gammapz2",
-                       "gammaE3_keV", "gammapx3", "gammapy3", "gammapz3",
-                       "gammaE4_keV", "gammapx4", "gammapy4", "gammapz4"]
-
-        for col_name in phi_columns:
-            phi_grp.create_dataset(
-                col_name, shape=(0,), maxshape=(None,),
-                dtype=np.float32, chunks=True,
-                compression='gzip', compression_opts=1
-            )
-
-        region_names = ['pit', 'bot', 'wall', 'top']
-        for region_name in region_names:
-            target_regions_grp.create_dataset(
-                region_name, shape=(0,), maxshape=(None,),
-                dtype=np.int32, chunks=True,
-                compression='gzip', compression_opts=1
-            )
-
         out.create_dataset(
-            "weights", shape=(0,), maxshape=(None,),
-            dtype=np.float32, chunks=True,
-            compression='gzip', compression_opts=1
+            "weights",
+            shape=(0,),
+            maxshape=(None,),
+            dtype=np.float32,
+            chunks=True,
+            compression='lzf'
         )
 
-        print(f"  Initialisiere {len(voxel_data)} Voxel mit Target-Datasets...")
+        # === Voxel Geometrie-Metadaten ===
+        voxels_grp = out.create_group("voxels")
+        print(f"  Initialisiere {len(voxel_data)} Voxel-Metadaten...")
         for voxel in voxel_data:
             if isinstance(voxel, dict):
                 voxel_idx = voxel['index']
                 voxel_grp = voxels_grp.create_group(str(voxel_idx))
                 voxel_grp.create_dataset("center", data=np.array(voxel['center'], dtype='f'))
-                dt = h5py.string_dtype(encoding='utf-8')
                 voxel_grp.create_dataset("layer", data=voxel['layer'], dtype=dt)
 
                 corners = np.array(voxel['corners'])
@@ -1218,16 +1247,8 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
                 corners_grp.create_dataset("y", data=corners[:, 1])
                 corners_grp.create_dataset("z", data=corners[:, 2])
 
-                target_grp.create_dataset(
-                    str(voxel_idx), shape=(0,), maxshape=(None,),
-                    dtype=np.int32, chunks=True,
-                    compression='gzip', compression_opts=1
-                )
+        print(f"  ✓ Alle {len(voxel_data)} Voxel-Metadaten erstellt")
 
-        print(f"  ✓ Alle {len(voxel_data)} Voxel-Datasets erstellt")
-
-        # Voxel Metadata
-        print(f"  Erstelle Voxel Metadata...")
         voxel_metadata = []
         for voxel in voxel_data:
             center = np.array(voxel['center'], dtype=np.float32)
@@ -1239,21 +1260,17 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
             is_bot = 1.0 if layer == 'bot' else 0.0
             is_wall = 1.0 if layer == 'wall' else 0.0
             is_top = 1.0 if layer == 'top' else 0.0
-            voxel_metadata.append([is_pit, is_bot, is_wall, is_top,
-                                   r_voxel, phi_voxel, z_voxel])
+            voxel_metadata.append([is_pit, is_bot, is_wall, is_top, r_voxel, phi_voxel, z_voxel])
 
         voxel_metadata = np.array(voxel_metadata, dtype=np.float32)
-        out.create_dataset(
-            "voxel_metadata", data=voxel_metadata,
-            dtype=np.float32, compression='gzip', compression_opts=1
-        )
+        out.create_dataset("voxel_metadata", data=voxel_metadata, dtype=np.float32, compression='lzf')
         print(f"  ✓ Voxel Metadata erstellt: Shape {voxel_metadata.shape}")
 
     return output_file
 
 
 def append_results_to_hdf5(output_file, result_data, voxel_indices, weight):
-    """Fügt Ergebnisse zur HDF5-Datei hinzu"""
+    """Fügt Ergebnisse zur HDF5-Datei hinzu (konsolidiertes 2D-Format)."""
     phi_data = result_data['phi_data']
     target_data = result_data['target_data']
     target_regions_data = result_data.get('target_regions')
@@ -1262,67 +1279,31 @@ def append_results_to_hdf5(output_file, result_data, voxel_indices, weight):
     if num_entries == 0:
         return 0
 
-    phi_columns = ["xNC_mm", "yNC_mm", "zNC_mm", "matID", "volID", "#gamma", "E_gamma_tot_keV",
-                   "r_NC_mm", "phi_NC_rad", "dist_to_wall_mm", "dist_to_bot_mm", "dist_to_top_mm",
-                   "p_mean_r", "p_mean_z",
-                   "global_muon_id", "nC_time_in_ns", "nC_flag_Ge77",
-                   "gammaE1_keV", "gammapx1", "gammapy1", "gammapz1",
-                   "gammaE2_keV", "gammapx2", "gammapy2", "gammapz2",
-                   "gammaE3_keV", "gammapx3", "gammapy3", "gammapz3",
-                   "gammaE4_keV", "gammapx4", "gammapy4", "gammapz4"]
-
     weights = np.full(num_entries, weight, dtype=np.float32)
 
     with h5py.File(output_file, 'a') as out:
-        phi_grp = out['phi']
-        target_grp = out['target']
+        # Phi Matrix erweitern
+        dset = out['phi_matrix']
+        old_size = dset.shape[0]
+        new_size = old_size + num_entries
+        dset.resize((new_size, dset.shape[1]))
+        dset[old_size:new_size, :] = phi_data
 
-        for i, col_name in enumerate(phi_columns):
-            if col_name not in phi_grp:
-                raise RuntimeError(f"Dataset '{col_name}' should already exist!")
-            dset = phi_grp[col_name]
-            old_size = dset.shape[0]
-            new_size = old_size + num_entries
-            dset.resize((new_size,))
-            dset[old_size:new_size] = phi_data[:, i]
+        # Target Matrix erweitern
+        dset = out['target_matrix']
+        dset.resize((new_size, dset.shape[1]))
+        dset[old_size:new_size, :] = target_data
 
-        for i, voxel_idx in enumerate(voxel_indices):
-            voxel_str = str(voxel_idx)
-            if voxel_str not in target_grp:
-                raise RuntimeError(f"Target dataset '{voxel_str}' does not exist!")
-            dset = target_grp[voxel_str]
-            old_size = dset.shape[0]
-            new_size = old_size + num_entries
-            dset.resize((new_size,))
-            dset[old_size:new_size] = target_data[:, i]
-
-        # Target Regions
+        # Region Matrix erweitern
         if target_regions_data is not None and len(target_regions_data) > 0:
-            target_regions_grp = out.get('target_regions')
-            if target_regions_grp is None:
-                target_regions_grp = out.create_group('target_regions')
-            region_names = ['pit', 'bot', 'wall', 'top']
-            for i, region_name in enumerate(region_names):
-                if region_name not in target_regions_grp:
-                    raise RuntimeError(f"Target regions dataset '{region_name}' should exist!")
-                dset = target_regions_grp[region_name]
-                old_size = dset.shape[0]
-                new_size = old_size + num_entries
-                dset.resize((new_size,))
-                dset[old_size:new_size] = target_regions_data[:, i]
+            dset = out['region_matrix']
+            dset.resize((new_size, dset.shape[1]))
+            dset[old_size:new_size, :] = target_regions_data
 
-        # Weights
-        if "weights" in out:
-            dset = out["weights"]
-            old_size = dset.shape[0]
-            new_size = old_size + num_entries
-            dset.resize((new_size,))
-            dset[old_size:new_size] = weights
-        else:
-            out.create_dataset(
-                "weights", data=weights, maxshape=(None,),
-                compression='gzip', compression_opts=1, chunks=True
-            )
+        # Weights erweitern
+        dset = out['weights']
+        dset.resize((new_size,))
+        dset[old_size:new_size] = weights
 
         out.flush()
 
