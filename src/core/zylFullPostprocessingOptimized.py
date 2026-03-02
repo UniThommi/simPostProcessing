@@ -530,6 +530,7 @@ def process_single_file(args):
     valid_detectors = geometry_params.get('valid_detectors', [1965, 1966, 1967, 1968])
     
     print(f"Worker {mp.current_process().pid}: Verarbeite {os.path.basename(file_path)}")
+    file_start_time = time.time()
     # print_memory_usage("Start Worker")
     
     phi_data_train = []     
@@ -860,9 +861,10 @@ def process_single_file(args):
     
     # print_memory_usage("Worker Ende")
 
+    file_elapsed = time.time() - file_start_time
     total_nc_events = len(nc_data_dict)
     processed_events = len(phi_data_train) + len(phi_data_val)
-    print(f"  NC-Events: {total_nc_events} total, {processed_events} verarbeitet")
+    print(f"  NC-Events: {total_nc_events} total, {processed_events} verarbeitet in {file_elapsed:.1f}s")
     if orphaned_photons > 0:
         print(f"  ℹ INFO: {orphaned_photons} Photonen ohne zugehöriges NC-Event verworfen. Erwartet für Photonen die durch Prozesse vor einem NC Event entstehen.")
 
@@ -1149,6 +1151,7 @@ def process_files_in_batches(files, voxel_tree, voxel_data, voxel_indices,
         batch_files = remaining_files[batch_start:batch_end]
         
         print(f"\n=== Batch {batch_start//batch_size + 1}: Files {batch_start+1}-{batch_end} ===")
+        batch_start_time = time.time()
         
         # Akkumulatoren für Batch
         batch_phi_train = []
@@ -1233,6 +1236,8 @@ def process_files_in_batches(files, voxel_tree, voxel_data, voxel_indices,
                 )
         
         # Checkpoint nach jedem Batch
+        batch_elapsed = time.time() - batch_start_time
+        print(f"  Batch abgeschlossen in {batch_elapsed:.1f}s")
         progress_tracker.verify_hdf5_integrity(output_file_val)
         
         # Speicher freigeben
@@ -1284,7 +1289,15 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
     ]
     region_columns = ['pit', 'bot', 'wall', 'top']
     
-    with h5py.File(output_file, 'w', libver="latest") as out:
+    # 64-bit Offsets und Lengths im Superblock erzwingen (für Dateien >2GB)
+    # Siehe: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t11.html
+    # Superblock-Felder "Size of Offsets" und "Size of Lengths" auf 8 Bytes setzen
+    fcpl = h5py.h5p.create(h5py.h5p.FILE_CREATE)
+    fcpl.set_sizes(8, 8)  # 8 Bytes = 64-bit für Offsets und Lengths
+    fapl = h5py.h5p.create(h5py.h5p.FILE_ACCESS)
+    fapl.set_libver_bounds(h5py.h5f.LIBVER_LATEST, h5py.h5f.LIBVER_LATEST)
+    fid = h5py.h5f.create(output_file.encode(), h5py.h5f.ACC_TRUNC, fcpl=fcpl, fapl=fapl)
+    with h5py.File(fid) as out:
         # === Konsolidierte 2D-Datasets ===
         out.create_dataset(
             "target_matrix",

@@ -639,6 +639,7 @@ def load_all_nc_data_from_sim1(
     eindeutig zu matchen.
     """
     print(f"\n=== Phase 1: Lade NC-Daten aus {len(sim1_files)} Sim1-Files ===")
+    phase1_start = time.time()
     nc_data_dict = {}
     global_muon_id_map: dict[tuple[int, int], int] = {}
     next_global_muon_id = 0
@@ -738,7 +739,8 @@ def load_all_nc_data_from_sim1(
     if duplicate_count > 0:
         print(f"  ⚠ WARNUNG: {duplicate_count} Duplikat-(run_id, muon_id, nC_id) Triplets!")
 
-    print(f"  ✓ {len(nc_data_dict)} einzigartige NC-Events geladen")
+    phase1_elapsed = time.time() - phase1_start
+    print(f"  ✓ {len(nc_data_dict)} einzigartige NC-Events geladen in {phase1_elapsed/60:.1f} min")
     print(f"  ✓ {len(global_muon_id_map)} einzigartige Muonen → globale IDs 0..{next_global_muon_id - 1}")
     print_memory_usage("Nach Phase 1")
     return nc_data_dict, global_muon_id_map
@@ -803,6 +805,7 @@ def scan_sim2_and_aggregate(
     print(f"  Chunk-Size: {CHUNK_SIZE}")
 
     file_counter = 0
+    phase2_start = time.time()
 
     for run_id in sorted(sim2_files_by_run.keys()):
         sim2_files = sim2_files_by_run[run_id]
@@ -961,6 +964,8 @@ def scan_sim2_and_aggregate(
             total_orphaned += file_orphaned
             print(f"      Matched: {file_matched}, Orphaned: {file_orphaned}, Unassigned: {file_unassigned}")
 
+        run_elapsed = time.time() - phase2_start
+        print(f"  Run {run_id} abgeschlossen in {run_elapsed/60:.1f} min (kumulativ)")
         if file_counter % 50 == 0:
             print_memory_usage(f"Nach {file_counter} Sim2-Files")
 
@@ -968,7 +973,8 @@ def scan_sim2_and_aggregate(
     ncs_without_photons = len(nc_data_dict) - ncs_with_photons
     total_hits = sum(sum(c.values()) for c in nc_voxel_counters.values())
 
-    print(f"\n  ✓ Sim2-Scan abgeschlossen:")
+    phase2_elapsed = time.time() - phase2_start
+    print(f"\n  ✓ Sim2-Scan abgeschlossen in {phase2_elapsed/60:.1f} min:")
     print(f"    NC-Events mit Photonen: {ncs_with_photons}")
     print(f"    NC-Events ohne Photonen: {ncs_without_photons}")
     print(f"    Gesamte Voxel-Hits: {total_hits}")
@@ -1012,6 +1018,7 @@ def write_output_in_batches(
         dict mit nc_with_photons, nc_without_photons, total_written
     """
     print(f"\n=== Phase 3: Schreibe Output batchweise für {len(nc_data_dict)} NC-Events ===")
+    phase3_start = time.time()
     print(f"  Batch-Size: {batch_size}")
 
     r_zylinder = geometry_params['r_zylinder']
@@ -1126,7 +1133,8 @@ def write_output_in_batches(
         if (batch_idx + 1) % 10 == 0 or batch_idx == num_batches - 1:
             print(f"  Batch {batch_idx + 1}/{num_batches}: {total_written} Einträge geschrieben")
 
-    print(f"\n  ✓ Schreiben abgeschlossen:")
+    phase3_elapsed = time.time() - phase3_start
+    print(f"\n  ✓ Schreiben abgeschlossen in {phase3_elapsed/60:.1f} min:")
     print(f"    NC-Events mit Photonen: {nc_with_photons}")
     print(f"    NC-Events ohne Photonen: {nc_without_photons}")
     print(f"    Gesamt geschrieben: {total_written}")
@@ -1178,7 +1186,15 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
                    "gammaE4_keV", "gammapx4", "gammapy4", "gammapz4"]
     region_columns = ['pit', 'bot', 'wall', 'top']
 
-    with h5py.File(output_file, 'w', libver="latest") as out:
+    # 64-bit Offsets und Lengths im Superblock erzwingen (für Dateien >2GB)
+    # Siehe: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t11.html
+    # Superblock-Felder "Size of Offsets" und "Size of Lengths" auf 8 Bytes setzen
+    fcpl = h5py.h5p.create(h5py.h5p.FILE_CREATE)
+    fcpl.set_sizes(8, 8)  # 8 Bytes = 64-bit für Offsets und Lengths
+    fapl = h5py.h5p.create(h5py.h5p.FILE_ACCESS)
+    fapl.set_libver_bounds(h5py.h5f.LIBVER_LATEST, h5py.h5f.LIBVER_LATEST)
+    fid = h5py.h5f.create(output_file.encode(), h5py.h5f.ACC_TRUNC, fcpl=fcpl, fapl=fapl)
+    with h5py.File(fid) as out:
         # === Konsolidierte 2D-Datasets ===
         out.create_dataset(
             "target_matrix",
