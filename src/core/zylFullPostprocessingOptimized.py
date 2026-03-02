@@ -742,30 +742,35 @@ def process_single_file(args):
             
             # print_memory_usage(f"Chunk {chunk_idx + 1} Nach Filterung")
             
-            # Gruppierung der Photonen nach (evtid, nC_id)
-            photon_groups = defaultdict(list)
-            for idx in range(len(photon_evtid_filtered)):
-                photon_groups[(photon_evtid_filtered[idx], photon_nC_id_filtered[idx])].append(idx)
-            
-            # Akkumuliere nur Voxel-Hits für NC-Events in diesem Chunk
-            for (e_id, nc_id), photon_indices in photon_groups.items():
-                if (e_id, nc_id) not in nc_data_dict:
-                    continue
-                
-                nc_info = nc_data_dict[(e_id, nc_id)]
-                
-                for i in photon_indices:
-                    x, y, z = x_filtered[i], y_filtered[i], z_filtered[i]
-                    voxel_index = assignToNearestVoxel(voxel_tree, voxel_data, (x, y, z))
-                    if voxel_index == "-1":
-                        unassigned_count += 1
-                    else:
-                        nc_voxel_counters[(e_id, nc_id)][voxel_index] += 1
-            
+            # Voxel-Zuordnung (vektorisiert — Batch-KDTree)
+            if len(x_filtered) > 0:
+                points = np.column_stack((x_filtered, y_filtered, z_filtered))
+                # Query sucht jeweils nächsten Voxel und gibt Abstand und diesen zurück.
+                _, voxel_idx_array = voxel_tree.query(points)
+                voxel_index_strings = np.array(
+                    [str(voxel_data[vi]['index']) for vi in voxel_idx_array]
+                )
+
+                evtid_int = photon_evtid_filtered.astype(np.int64)
+                nC_id_int = photon_nC_id_filtered.astype(np.int64)
+                paired = np.stack([evtid_int, nC_id_int], axis=1)
+                unique_pairs, inverse = np.unique(paired, axis=0, return_inverse=True)
+
+                for pair_idx, (e_id, nc_id) in enumerate(unique_pairs):
+                    key = (int(e_id), int(nc_id))
+                    if key not in nc_data_dict:
+                        continue
+
+                    mask = inverse == pair_idx
+                    voxel_strs = voxel_index_strings[mask]
+                    for vs in voxel_strs:
+                        nc_voxel_counters[key][vs] += 1
+
+                del points, voxel_idx_array, voxel_index_strings, paired
+
             # Chunk-Daten explizit löschen
             del x_filtered, y_filtered, z_filtered
             del photon_evtid_filtered, photon_nC_id_filtered
-            del photon_groups
             
             # print_memory_usage(f"Chunk {chunk_idx + 1} Ende")
 

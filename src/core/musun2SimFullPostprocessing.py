@@ -922,27 +922,33 @@ def scan_sim2_and_aggregate(
 
                         file_matched += len(x)
 
-                        # Voxel-Zuordnung
-                        photon_groups = defaultdict(list)
-                        for idx in range(len(muon_ids)):
-                            photon_groups[(int(muon_ids[idx]), int(nc_ids[idx]))].append(idx)
+                        # Voxel-Zuordnung (vektorisiert — Batch-KDTree)
+                        points = np.column_stack((x, y, z))
+                        # Query sucht jeweils nächsten Voxel und gibt Abstand und diesen zurück.
+                        _, voxel_idx_array = voxel_tree.query(points)
+                        voxel_index_strings = np.array(
+                            [str(voxel_data[vi]['index']) for vi in voxel_idx_array]
+                        )
 
-                        for (m_id, n_id), indices in photon_groups.items():
-                            full_key = (run_id, m_id, n_id)
+                        muon_ids_int = muon_ids.astype(np.int64)
+                        nc_ids_int = nc_ids.astype(np.int64)
+                        paired = np.stack([muon_ids_int, nc_ids_int], axis=1)
+                        unique_pairs, inverse = np.unique(paired, axis=0, return_inverse=True)
+
+                        for pair_idx, (m_id, n_id) in enumerate(unique_pairs):
+                            full_key = (run_id, int(m_id), int(n_id))
+                            mask = inverse == pair_idx
+
                             if full_key not in nc_data_dict:
-                                file_orphaned += len(indices)
+                                file_orphaned += int(np.sum(mask))
                                 continue
 
-                            for i in indices:
-                                voxel_idx = assignToNearestVoxel(
-                                    voxel_tree, voxel_data, (x[i], y[i], z[i])
-                                )
-                                if voxel_idx == "-1":
-                                    file_unassigned += 1
-                                else:
-                                    nc_voxel_counters[full_key][voxel_idx] += 1
+                            voxel_strs = voxel_index_strings[mask]
+                            for vs in voxel_strs:
+                                nc_voxel_counters[full_key][vs] += 1
 
                         del x, y, z, px, py, pz, muon_ids, nc_ids, det_uids, photon_times
+                        del points, voxel_idx_array, voxel_index_strings, paired
                         gc.collect()
 
             except RuntimeError:
