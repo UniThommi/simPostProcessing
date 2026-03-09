@@ -36,89 +36,73 @@ def analyze_hdf5_structure(
     }
     
     with h5py.File(filepath, 'r') as f:
-        n_events = f['phi']['#gamma'].shape[0]
+        n_events = f['phi_matrix'].shape[0]
+        phi_columns = [c.decode() if isinstance(c, bytes) else c for c in f['phi_columns'][:]]
+        region_columns = [c.decode() if isinstance(c, bytes) else c for c in f['region_columns'][:]]
+        target_columns = [c.decode() if isinstance(c, bytes) else c for c in f['target_columns'][:]]
+        n_targets = len(target_columns)
         print(f"Analysiere {n_events:,} Events...")
-        
+
         # === 1. PHI FEATURES (außer matID, volID) ===
         print("\n[1/3] Analysiere phi-Features...")
-        phi_group = f['phi']
         excluded = {'matID', 'volID'}
-        phi_keys = [k for k in phi_group.keys() if k not in excluded]
-        
-        # Initialisiere mit +/- inf
-        phi_stats = {key: {'min': np.inf, 'max': -np.inf} for key in phi_keys}
-        
+        phi_indices = {name: i for i, name in enumerate(phi_columns) if name not in excluded}
+
+        phi_stats = {name: {'min': np.inf, 'max': -np.inf} for name in phi_indices}
+
         for start_idx in range(0, n_events, chunk_size):
             end_idx = min(start_idx + chunk_size, n_events)
-            
-            for key in phi_keys:
-                chunk = phi_group[key][start_idx:end_idx]
-                phi_stats[key]['min'] = min(phi_stats[key]['min'], float(np.min(chunk)))
-                phi_stats[key]['max'] = max(phi_stats[key]['max'], float(np.max(chunk)))
-            
+            chunk = f['phi_matrix'][start_idx:end_idx]
+
+            for name, col_idx in phi_indices.items():
+                col = chunk[:, col_idx]
+                phi_stats[name]['min'] = min(phi_stats[name]['min'], float(np.min(col)))
+                phi_stats[name]['max'] = max(phi_stats[name]['max'], float(np.max(col)))
+
             if (start_idx // chunk_size + 1) % 5 == 0:
                 print(f"  Chunk {start_idx//chunk_size + 1}/{(n_events-1)//chunk_size + 1}")
-        
+
         results['phi_features'] = phi_stats
-        
-        # === 2. TARGET REGIONS (bot, pit, top, wall) ===
+
+        # === 2. TARGET REGIONS ===
         print("\n[2/3] Analysiere target_regions...")
-        region_keys = ['bot', 'pit', 'top', 'wall']
-        region_stats = {key: {'min': np.inf, 'max': -np.inf} for key in region_keys}
+        region_stats = {name: {'min': np.inf, 'max': -np.inf} for name in region_columns}
         sum_stats = {'min': np.inf, 'max': -np.inf}
-        
+
         for start_idx in range(0, n_events, chunk_size):
             end_idx = min(start_idx + chunk_size, n_events)
-            
-            # Lade alle 4 Regionen für diesen Chunk
-            region_chunks = {
-                key: f['target_regions'][key][start_idx:end_idx] 
-                for key in region_keys
-            }
-            
-            # Individuelle Min/Max pro Region
-            for key in region_keys:
-                chunk = region_chunks[key]
-                region_stats[key]['min'] = min(region_stats[key]['min'], int(np.min(chunk)))
-                region_stats[key]['max'] = max(region_stats[key]['max'], int(np.max(chunk)))
-            
-            # Summe über alle 4 Regionen pro Event
-            event_sums = sum(region_chunks.values())
+            chunk = f['region_matrix'][start_idx:end_idx]
+
+            for col_idx, name in enumerate(region_columns):
+                col = chunk[:, col_idx]
+                region_stats[name]['min'] = min(region_stats[name]['min'], int(np.min(col)))
+                region_stats[name]['max'] = max(region_stats[name]['max'], int(np.max(col)))
+
+            event_sums = chunk.sum(axis=1)
             sum_stats['min'] = min(sum_stats['min'], int(np.min(event_sums)))
             sum_stats['max'] = max(sum_stats['max'], int(np.max(event_sums)))
-            
+
             if (start_idx // chunk_size + 1) % 5 == 0:
                 print(f"  Chunk {start_idx//chunk_size + 1}/{(n_events-1)//chunk_size + 1}")
-        
+
         results['target_regions'] = region_stats
         results['target_regions_sum'] = sum_stats
-        
-        # # === 3. INDIVIDUAL TARGETS (Voxel-weise) ===
-        # print("\n[3/3] Analysiere individual targets (Voxel)...")
-        target_group = f['target']
-        target_keys = list(target_group.keys())
-        n_targets = len(target_keys)
-        print(f"  Gefunden: {n_targets} Targets/Voxel")
-        
-        # Globale Min/Max über alle Voxel
+
+        # === 3. INDIVIDUAL TARGETS (Voxel-weise) ===
+        print(f"\n[3/4] Analysiere individual targets ({n_targets} Voxel)...")
         global_target_min = np.inf
         global_target_max = -np.inf
-        
-        for target_idx, target_key in enumerate(target_keys):
-            target_dataset = target_group[target_key]
-            
-            # Chunked processing pro Target
-            for start_idx in range(0, n_events, chunk_size):
-                end_idx = min(start_idx + chunk_size, n_events)
-                chunk = target_dataset[start_idx:end_idx]
-                
-                global_target_min = min(global_target_min, int(np.min(chunk)))
-                global_target_max = max(global_target_max, int(np.max(chunk)))
-            
-            # Progress alle 500 Targets
-            if (target_idx + 1) % 500 == 0:
-                print(f"  Verarbeitet: {target_idx + 1}/{n_targets} Targets")
-        
+
+        for start_idx in range(0, n_events, chunk_size):
+            end_idx = min(start_idx + chunk_size, n_events)
+            chunk = f['target_matrix'][start_idx:end_idx]
+
+            global_target_min = min(global_target_min, int(np.min(chunk)))
+            global_target_max = max(global_target_max, int(np.max(chunk)))
+
+            if (start_idx // chunk_size + 1) % 5 == 0:
+                print(f"  Chunk {start_idx//chunk_size + 1}/{(n_events-1)//chunk_size + 1}")
+
         results['individual_targets'] = {
             'min_over_all_voxels': int(global_target_min),
             'max_over_all_voxels': int(global_target_max),
@@ -127,29 +111,22 @@ def analyze_hdf5_structure(
 
         # === 4. VOXEL HIT MULTIPLICITY PRO EVENT ===
         print("\n[4/4] Analysiere Voxel-Hit-Multiplizität pro Event...")
-        
         global_min_hits = np.inf
         global_max_hits = -np.inf
         total_hits = 0
-        
+
         for start_idx in range(0, n_events, chunk_size):
             end_idx = min(start_idx + chunk_size, n_events)
-            
-            # Lade alle Voxel als 2D-Array → (n_voxels, chunk_len)
-            stacked = np.stack(
-                [target_group[k][start_idx:end_idx] for k in target_keys],
-                axis=0
-            )
-            # Hits pro Event: Anzahl Voxel mit >0 Photonen → (chunk_len,)
-            hit_counts = np.count_nonzero(stacked, axis=0)
-            
+            chunk = f['target_matrix'][start_idx:end_idx]
+
+            hit_counts = np.count_nonzero(chunk, axis=1)
             global_min_hits = min(global_min_hits, int(hit_counts.min()))
             global_max_hits = max(global_max_hits, int(hit_counts.max()))
             total_hits += int(hit_counts.sum())
-            
+
             if (start_idx // chunk_size + 1) % 5 == 0:
                 print(f"  Chunk {start_idx//chunk_size + 1}/{(n_events-1)//chunk_size + 1}")
-        
+
         results['voxel_hit_multiplicity'] = {
             'min_hits_per_event': int(global_min_hits),
             'max_hits_per_event': int(global_max_hits),
@@ -211,7 +188,7 @@ def print_summary(results: Dict[str, Any]) -> None:
 if __name__ == "__main__":
     # Analysiere beide Dateien
     for dataset_name in ["train", "validation"]:
-        hdf5_file = f"/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/MLFormatHomogeneousNCsZylSSD300PMTs/resum_output_0_{dataset_name}.hdf5"
+        hdf5_file = f"/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/MLFormatHomogeneousNCsZylSSD300PMTs/ncscore_output_0_{dataset_name}.hdf5"
         output_json = f"analysis_results_{dataset_name}.json"
         
         print(f"\n{'='*60}")
