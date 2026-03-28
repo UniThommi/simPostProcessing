@@ -7,3 +7,4 @@ data/processed/
 *.png
 *.txt
 analysis_results*
+*.md
