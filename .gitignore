@@ -8,3 +8,4 @@ data/processed/
 *.txt
 analysis_results*
 *.md
+*local.json
