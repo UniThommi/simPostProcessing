@@ -3,6 +3,7 @@ import glob
 import json
 import h5py
 import sys
+import re
 import numpy as np
 import pandas as pd
 from collections import defaultdict, Counter
@@ -199,7 +200,7 @@ class ProgressTracker:
         """Prüft ob HDF5-Datei lesbar ist"""
         try:
             with h5py.File(output_file, 'r') as f:
-                if 'phi_matrix' in f and 'target_matrix' in f:
+                if 'phi_matrix' in f and 'target_matrix' in f and 'event_ids' in f:
                     _ = f['phi_matrix'].shape
                     return True
         except Exception as e:
@@ -414,6 +415,82 @@ def collect_all_volumes_first(files):
     return all_volumes
 
 # ============================================================================
+# Run Directory Validation
+# ============================================================================
+
+_RUN_DIR_PATTERN = re.compile(r'^run_(\d+)$')
+
+
+def validate_run_structure(path: str, nested: bool, label: str):
+    """
+    Validates the input directory structure.
+
+    Nested mode: every subdirectory that contains output_*.hdf5 files must
+    match the 'run_NNN' naming pattern. Raises RuntimeError for violations.
+
+    Non-nested mode: checks that output_*.hdf5 files are present directly
+    in path.
+    """
+    p = Path(path)
+    if nested:
+        dirs_with_files = []
+        for subdir in sorted(p.iterdir()):
+            if not subdir.is_dir():
+                continue
+            if glob.glob(os.path.join(subdir, 'output_*.hdf5')):
+                dirs_with_files.append(subdir)
+
+        if not dirs_with_files:
+            raise RuntimeError(
+                f"[{label}] --nested specified but no subdirectories with "
+                f"output_*.hdf5 files found in '{path}'"
+            )
+
+        for subdir in dirs_with_files:
+            if not _RUN_DIR_PATTERN.match(subdir.name):
+                raise RuntimeError(
+                    f"[{label}] Directory '{subdir.name}' in '{path}' contains "
+                    f"HDF5 files but does not match the expected 'run_NNN' pattern. "
+                    f"All run directories must follow this naming convention."
+                )
+
+        print(f"[{label}] Run structure OK: {len(dirs_with_files)} run directories")
+        for subdir in dirs_with_files:
+            n = len(glob.glob(os.path.join(subdir, 'output_*.hdf5')))
+            print(f"  {subdir.name}: {n} HDF5 file(s)")
+    else:
+        hdf5_files = sorted(glob.glob(os.path.join(path, 'output_*.hdf5')))
+        if not hdf5_files:
+            raise RuntimeError(
+                f"[{label}] No output_*.hdf5 files found directly in '{path}'. "
+                f"If files are in subdirectories, use --nested."
+            )
+        print(f"[{label}] Found {len(hdf5_files)} HDF5 file(s) directly in '{path}'")
+
+
+def build_file_run_id_map(files: list, nested: bool) -> dict:
+    """
+    Returns a mapping {file_path: run_id} for every file in 'files'.
+
+    Non-nested: all files get run_id = -1.
+    Nested: run_id is parsed from the parent directory name (run_NNN → N).
+    """
+    if not nested:
+        return {f: -1 for f in files}
+
+    result = {}
+    for file_path in files:
+        run_id = -1
+        for part in Path(file_path).parts:
+            m = _RUN_DIR_PATTERN.match(part)
+            if m:
+                run_id = int(m.group(1))
+                break
+        result[file_path] = run_id
+    return result
+
+
+# ============================================================================
 # File Discovery
 # ============================================================================
 
@@ -521,8 +598,8 @@ def defineZylinder(geometry_name, valid_detectors=None):
     return (t_zylinder, l_voxel, t_voxel, r_pit, dz_pit, r_zyl_bot, r_zyl_top, z_offset, r_zylinder, h_zylinder, z_origin, r_ref, h_ref, z_ref, valid_detectors)
 
 def process_single_file(args):
-    (file_path, file_idx, voxel_tree, voxel_data, voxel_indices, 
-     materialMappingPath, volumeMappingPath, geometry_params, val_triplets) = args
+    (file_path, file_idx, voxel_tree, voxel_data, voxel_indices,
+     materialMappingPath, volumeMappingPath, geometry_params, val_triplets, run_id) = args
     
     # Geometrie-Parameter entpacken
     h_zylinder = geometry_params['h_zylinder']
@@ -533,12 +610,14 @@ def process_single_file(args):
     file_start_time = time.time()
     # print_memory_usage("Start Worker")
     
-    phi_data_train = []     
+    phi_data_train = []
     target_data_train = []
-    target_regions_train = []  
-    phi_data_val = []      
+    target_regions_train = []
+    event_ids_train = []
+    phi_data_val = []
     target_data_val = []
     target_regions_val = []
+    event_ids_val = []
     unassigned_count = 0
 
     # Anpassbare Chunk-Größe basierend auf verfügbarem Speicher
@@ -850,14 +929,17 @@ def process_single_file(args):
         target_regions_row = [region_hits['pit'], region_hits['bot'], 
                              region_hits['wall'], region_hits['top']]
         
+        event_id_row = [run_id, int(nc_id)]
         if (file_idx, e_id, nc_id) in val_triplets:
             phi_data_val.append(phi_row)
             target_data_val.append(target_row)
             target_regions_val.append(target_regions_row)
+            event_ids_val.append(event_id_row)
         else:
             phi_data_train.append(phi_row)
             target_data_train.append(target_row)
             target_regions_train.append(target_regions_row)
+            event_ids_train.append(event_id_row)
     
     # print_memory_usage("Worker Ende")
 
@@ -879,13 +961,16 @@ def process_single_file(args):
     del nc_voxel_counters, nc_data_dict
     gc.collect()
     
+    _empty2 = np.empty((0, 2), dtype=np.int64)
     return {
         'phi_data_train': np.array(phi_data_train, dtype=np.float32) if phi_data_train else np.array([]),
         'target_data_train': np.array(target_data_train, dtype=np.int32) if target_data_train else np.array([]),
         'target_regions_train': np.array(target_regions_train, dtype=np.int32) if target_regions_train else np.array([]),
-        'phi_data_val': np.array(phi_data_val, dtype=np.float32) if phi_data_val else np.array([]),      
+        'event_ids_train': np.array(event_ids_train, dtype=np.int64) if event_ids_train else _empty2,
+        'phi_data_val': np.array(phi_data_val, dtype=np.float32) if phi_data_val else np.array([]),
         'target_data_val': np.array(target_data_val, dtype=np.int32) if target_data_val else np.array([]),
         'target_regions_val': np.array(target_regions_val, dtype=np.int32) if target_regions_val else np.array([]),
+        'event_ids_val': np.array(event_ids_val, dtype=np.int64) if event_ids_val else _empty2,
         'unassigned_count': unassigned_count,
         'orphaned_photons': orphaned_photons,
         'file_processed': os.path.basename(file_path)
@@ -897,13 +982,14 @@ def append_results_to_hdf5(output_file, result_data, voxel_indices, weight, data
     phi_data = result_data['phi_data']
     target_data = result_data['target_data']
     target_regions_data = result_data.get('target_regions')
+    event_ids_data = result_data.get('event_ids')
     num_entries = len(phi_data)
-    
+
     if num_entries == 0:
         return 0
-    
+
     weights = np.full(num_entries, weight, dtype=np.float32)
-    
+
     with h5py.File(output_file, 'a') as out:
         # Phi Matrix erweitern
         dset = out['phi_matrix']
@@ -911,25 +997,31 @@ def append_results_to_hdf5(output_file, result_data, voxel_indices, weight, data
         new_size = old_size + num_entries
         dset.resize((new_size, dset.shape[1]))
         dset[old_size:new_size, :] = phi_data
-        
+
         # Target Matrix erweitern
         dset = out['target_matrix']
         dset.resize((new_size, dset.shape[1]))
         dset[old_size:new_size, :] = target_data
-        
+
         # Region Matrix erweitern
         if target_regions_data is not None and len(target_regions_data) > 0:
             dset = out['region_matrix']
             dset.resize((new_size, dset.shape[1]))
             dset[old_size:new_size, :] = target_regions_data
-        
+
+        # Event IDs erweitern
+        if event_ids_data is not None and len(event_ids_data) > 0:
+            dset = out['event_ids']
+            dset.resize((new_size, dset.shape[1]))
+            dset[old_size:new_size, :] = event_ids_data
+
         # Weights erweitern
         dset = out['weights']
         dset.resize((new_size,))
         dset[old_size:new_size] = weights
-        
+
         out.flush()
-    
+
     return num_entries
 
 def collect_all_nc_triplets(files): 
@@ -1132,98 +1224,108 @@ def process_files_sequentially(files, voxel_tree, voxel_data, voxel_indices,
             print(f"Laufzeit: {stats['elapsed_time']/60:.1f} min")
             print(f"Einträge Train: {stats['total_entries_train']}, Val: {stats['total_entries_val']}")  # [GEÄNDERT]
             
-def process_files_in_batches(files, voxel_tree, voxel_data, voxel_indices, 
+def process_files_in_batches(files, voxel_tree, voxel_data, voxel_indices,
                              material_mapping_path, volume_mapping_path,
-                             geometry_params, output_file_train, output_file_val, 
-                             weight, progress_tracker, val_triplets, batch_size=10):
+                             geometry_params, output_file_train, output_file_val,
+                             weight, progress_tracker, val_triplets, file_run_id_map,
+                             batch_size=10):
     """Verarbeitet Files in Batches und schreibt akkumuliert"""
-    
+
     remaining_files = progress_tracker.get_remaining_files(files)
-    
+
     if not remaining_files:
         print("Alle Files bereits verarbeitet!")
         return
-    
+
     print(f"Verarbeite {len(remaining_files)} Files in Batches von {batch_size}")
-    
+
     for batch_start in range(0, len(remaining_files), batch_size):
         batch_end = min(batch_start + batch_size, len(remaining_files))
         batch_files = remaining_files[batch_start:batch_end]
-        
+
         print(f"\n=== Batch {batch_start//batch_size + 1}: Files {batch_start+1}-{batch_end} ===")
         batch_start_time = time.time()
-        
+
         # Akkumulatoren für Batch
         batch_phi_train = []
         batch_target_train = []
         batch_target_regions_train = []
+        batch_event_ids_train = []
         batch_phi_val = []
         batch_target_val = []
         batch_target_regions_val = []
+        batch_event_ids_val = []
         file_stats = {}
-        
+
         for file_path in batch_files:
             try:
-                file_idx = files.index(file_path)  # ← NEU
-    
+                file_idx = files.index(file_path)
+                run_id = file_run_id_map.get(file_path, -1)
+
                 args = (file_path, file_idx, voxel_tree, voxel_data, voxel_indices,
-                    material_mapping_path, volume_mapping_path,
-                    geometry_params, val_triplets)
-                
+                        material_mapping_path, volume_mapping_path,
+                        geometry_params, val_triplets, run_id)
+
                 result = process_single_file(args)
-                
+
                 # Tracke individuelle Counts
                 train_count = len(result['phi_data_train'])
                 val_count = len(result['phi_data_val'])
-                
+
                 file_stats[file_path] = {
                     'train': train_count,
                     'val': val_count,
                     'unassigned': result['unassigned_count']
                 }
-                
+
                 if train_count > 0:
                     batch_phi_train.append(result['phi_data_train'])
                     batch_target_train.append(result['target_data_train'])
                     batch_target_regions_train.append(result['target_regions_train'])
-                
+                    batch_event_ids_train.append(result['event_ids_train'])
+
                 if val_count > 0:
                     batch_phi_val.append(result['phi_data_val'])
                     batch_target_val.append(result['target_data_val'])
                     batch_target_regions_val.append(result['target_regions_val'])
-                
-                print(f"  ✓ {os.path.basename(file_path)} (Train: {train_count}, Val: {val_count})")
-                                
+                    batch_event_ids_val.append(result['event_ids_val'])
+
+                print(f"  ✓ {os.path.basename(file_path)} (Train: {train_count}, Val: {val_count}, run_id: {run_id})")
+
             except Exception as e:
                 print(f"  ✗ {os.path.basename(file_path)}: {e}")
                 progress_tracker.mark_file_failed(file_path, str(e))
                 continue
-        
+
         # Batch-Write
         if batch_phi_train:
             combined_phi_train = np.vstack(batch_phi_train)
             combined_target_train = np.vstack(batch_target_train)
             combined_target_regions_train = np.vstack(batch_target_regions_train)
+            combined_event_ids_train = np.vstack(batch_event_ids_train)
             entries_train = append_results_to_hdf5(
                 output_file_train,
                 {'phi_data': combined_phi_train, 'target_data': combined_target_train,
-                 'target_regions': combined_target_regions_train},
+                 'target_regions': combined_target_regions_train,
+                 'event_ids': combined_event_ids_train},
                 voxel_indices, weight, 'train'
             )
             print(f"  Batch Train geschrieben: {entries_train} Einträge")
-        
+
         if batch_phi_val:
             combined_phi_val = np.vstack(batch_phi_val)
             combined_target_val = np.vstack(batch_target_val)
             combined_target_regions_val = np.vstack(batch_target_regions_val)
+            combined_event_ids_val = np.vstack(batch_event_ids_val)
             entries_val = append_results_to_hdf5(
                 output_file_val,
                 {'phi_data': combined_phi_val, 'target_data': combined_target_val,
-                 'target_regions': combined_target_regions_val},
+                 'target_regions': combined_target_regions_val,
+                 'event_ids': combined_event_ids_val},
                 voxel_indices, weight, 'val'
             )
             print(f"  Batch Val geschrieben: {entries_val} Einträge")
-        
+
         # Markiere alle Files im Batch als completed
         for file_path in batch_files:
             if str(file_path) not in [f['file'] for f in progress_tracker.progress_data['failed_files']]:
@@ -1234,15 +1336,15 @@ def process_files_in_batches(files, voxel_tree, voxel_data, voxel_indices,
                     stats['val'],
                     stats['unassigned']
                 )
-        
+
         # Checkpoint nach jedem Batch
         batch_elapsed = time.time() - batch_start_time
         print(f"  Batch abgeschlossen in {batch_elapsed:.1f}s")
         progress_tracker.verify_hdf5_integrity(output_file_val)
-        
+
         # Speicher freigeben
-        del batch_phi_train, batch_target_train, batch_target_regions_train
-        del batch_phi_val, batch_target_val, batch_target_regions_val
+        del batch_phi_train, batch_target_train, batch_target_regions_train, batch_event_ids_train
+        del batch_phi_val, batch_target_val, batch_target_regions_val, batch_event_ids_val
         del result
         gc.collect()
 
@@ -1266,7 +1368,8 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
     if os.path.exists(output_file):
         try:
             with h5py.File(output_file, 'r') as f:
-                if 'phi_matrix' in f and 'target_matrix' in f and 'voxels' in f and 'voxel_metadata' in f:
+                if ('phi_matrix' in f and 'target_matrix' in f and
+                        'voxels' in f and 'voxel_metadata' in f and 'event_ids' in f):
                     print(f"Bestehende Output-Datei gefunden: {output_file}")
                     return output_file
         except:
@@ -1288,7 +1391,8 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
         "gammaE4_keV", "gammapx4", "gammapy4", "gammapz4"
     ]
     region_columns = ['pit', 'bot', 'wall', 'top']
-    
+    event_id_columns = ["run_id", "nc_id"]
+
     # 64-bit Offsets und Lengths im Superblock erzwingen (für Dateien >2GB)
     # Siehe: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t11.html
     # Superblock-Felder "Size of Offsets" und "Size of Lengths" auf 8 Bytes setzen
@@ -1325,13 +1429,24 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
             chunks=(1000, len(region_columns)),
             compression='lzf'
         )
-        
+
+        # === Event ID Dataset (run_id, nc_id) ===
+        out.create_dataset(
+            "event_ids",
+            shape=(0, len(event_id_columns)),
+            maxshape=(None, len(event_id_columns)),
+            dtype=np.int64,
+            chunks=(1000, len(event_id_columns)),
+            compression='lzf'
+        )
+
         # === Spalten-Metadaten (für Zuordnung Spalte → Name) ===
         dt = h5py.string_dtype(encoding='utf-8')
         out.create_dataset("target_columns", data=[str(idx) for idx in voxel_indices], dtype=dt)
         out.create_dataset("phi_columns", data=phi_columns, dtype=dt)
         out.create_dataset("region_columns", data=region_columns, dtype=dt)
-        
+        out.create_dataset("event_id_columns", data=event_id_columns, dtype=dt)
+
         # === Statische Daten (unverändert) ===
         theta_grp = out.create_group("theta")
         theta_grp.create_dataset("inner_radius_in_mm", data=radius)
@@ -1474,6 +1589,10 @@ def main():
     if not os.path.exists(args.input):
         print(f"Fehler: Eingabe-Pfad existiert nicht: {args.input}")
         sys.exit(1)
+
+    # === Run Structure Validation ===
+    print("\n=== Validiere Eingabe-Struktur ===")
+    validate_run_structure(args.input, nested=args.nested, label="Sim")
     
     if not os.path.exists(args.voxel_file):
         print(f"Fehler: Voxel-Datei existiert nicht: {args.voxel_file}")
@@ -1504,6 +1623,9 @@ def main():
         print(f"Fehler: Keine output_*.hdf5 Dateien gefunden!")
         sys.exit(1)
     print(f"Gefunden: {len(files)} Dateien insgesamt")
+
+    # Run-ID-Mapping aufbauen (file_path → run_id)
+    file_run_id_map = build_file_run_id_map(files, args.nested)
 
     # Output-Datei definieren
     output_file_train = os.path.join(args.output, "ncscore_output_0_train.hdf5")
@@ -1586,8 +1708,8 @@ def main():
         process_files_in_batches(
             files, voxel_tree, voxel_data, voxel_indices,
             args.material_mapping, args.volume_mapping,
-            geometry_params, output_file_train, output_file_val, 
-            weight, progress_tracker, val_triplets, batch_size=20
+            geometry_params, output_file_train, output_file_val,
+            weight, progress_tracker, val_triplets, file_run_id_map, batch_size=20
         )
     except KeyboardInterrupt:
         print(f"\nVerarbeitung durch Benutzer unterbrochen.")

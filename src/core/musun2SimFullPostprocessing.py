@@ -29,6 +29,7 @@ import glob
 import json
 import h5py
 import sys
+import re
 import numpy as np
 from collections import defaultdict, Counter
 from scipy.spatial import KDTree
@@ -195,7 +196,7 @@ class ProgressTracker:
         """Prüft ob HDF5-Datei lesbar ist"""
         try:
             with h5py.File(output_file, 'r') as f:
-                if 'phi_matrix' in f and 'target_matrix' in f:
+                if 'phi_matrix' in f and 'target_matrix' in f and 'event_ids' in f:
                     _ = f['phi_matrix'].shape
                     return True
         except Exception as e:
@@ -383,6 +384,95 @@ def collect_all_volumes_first(files):
 
 
 # ============================================================================
+# Run Directory Validation
+# ============================================================================
+
+_RUN_DIR_PATTERN = re.compile(r'^run_(\d+)$')
+
+
+def _parse_run_id_from_name(name: str) -> int:
+    """Parse integer run_id from a directory name like 'run_007' → 7."""
+    m = _RUN_DIR_PATTERN.match(name)
+    if m:
+        return int(m.group(1))
+    return -1
+
+
+def validate_run_structure(path: str, nested: bool, label: str):
+    """
+    Validates the input directory structure.
+
+    Nested mode: every subdirectory that contains output_*.hdf5 files must
+    match the 'run_NNN' naming pattern. Raises RuntimeError for violations.
+
+    Non-nested mode: checks that output_*.hdf5 files are present directly
+    in path.
+    """
+    p = Path(path)
+    if nested:
+        dirs_with_files = []
+        for subdir in sorted(p.iterdir()):
+            if not subdir.is_dir():
+                continue
+            if glob.glob(os.path.join(subdir, 'output_*.hdf5')):
+                dirs_with_files.append(subdir)
+
+        if not dirs_with_files:
+            raise RuntimeError(
+                f"[{label}] --nested specified but no subdirectories with "
+                f"output_*.hdf5 files found in '{path}'"
+            )
+
+        for subdir in dirs_with_files:
+            if not _RUN_DIR_PATTERN.match(subdir.name):
+                raise RuntimeError(
+                    f"[{label}] Directory '{subdir.name}' in '{path}' contains "
+                    f"HDF5 files but does not match the expected 'run_NNN' pattern. "
+                    f"All run directories must follow this naming convention."
+                )
+
+        print(f"[{label}] Run structure OK: {len(dirs_with_files)} run directories")
+        for subdir in dirs_with_files:
+            n = len(glob.glob(os.path.join(subdir, 'output_*.hdf5')))
+            print(f"  {subdir.name}: {n} HDF5 file(s)")
+    else:
+        hdf5_files = sorted(glob.glob(os.path.join(path, 'output_*.hdf5')))
+        if not hdf5_files:
+            raise RuntimeError(
+                f"[{label}] No output_*.hdf5 files found directly in '{path}'. "
+                f"If files are in subdirectories, use --nested."
+            )
+        print(f"[{label}] Found {len(hdf5_files)} HDF5 file(s) directly in '{path}'")
+
+
+def validate_sim1_sim2_consistency(sim1_path: str, sim2_path: str):
+    """
+    Cross-checks that sim1 and sim2 have matching run directories.
+    Warns about runs present in one but not the other.
+    """
+    def _get_run_names(path):
+        return {
+            d.name for d in Path(path).iterdir()
+            if d.is_dir() and _RUN_DIR_PATTERN.match(d.name)
+        }
+
+    sim1_runs = _get_run_names(sim1_path)
+    sim2_runs = _get_run_names(sim2_path)
+
+    only_in_sim1 = sim1_runs - sim2_runs
+    only_in_sim2 = sim2_runs - sim1_runs
+
+    if only_in_sim1:
+        print(f"  WARNING: Runs in Sim1 without matching Sim2 directory "
+              f"(NC events will be dropped): {sorted(only_in_sim1)}")
+    if only_in_sim2:
+        print(f"  WARNING: Runs in Sim2 without matching Sim1 directory "
+              f"(photon data will be ignored): {sorted(only_in_sim2)}")
+    if not only_in_sim1 and not only_in_sim2:
+        print(f"  Sim1/Sim2 run directories match: {sorted(sim1_runs)}")
+
+
+# ============================================================================
 # File Discovery
 # ============================================================================
 
@@ -415,19 +505,21 @@ def find_sim2_files(sim2_path: str, nested: bool = False) -> dict[int, list[str]
     if nested:
         subdirs = sorted(Path(sim2_path).iterdir())
         for subdir in subdirs:
-            if not subdir.is_dir() or not subdir.name.startswith("run_"):
-                continue
-            try:
-                run_id = int(subdir.name.split("_")[1])
-            except (IndexError, ValueError):
-                print(f"  ⚠ Kann run_id nicht aus {subdir.name} extrahieren, überspringe")
+            if not subdir.is_dir():
                 continue
             run_files = sorted(glob.glob(os.path.join(subdir, 'output_t*.hdf5')))
             if not run_files:
                 run_files = sorted(glob.glob(os.path.join(subdir, 'output_*.hdf5')))
-            if run_files:
-                files_by_run[run_id] = run_files
-                print(f"  Sim2 run_{run_id:03d}: {len(run_files)} Files")
+            if not run_files:
+                continue  # empty dir, skip silently
+            run_id = _parse_run_id_from_name(subdir.name)
+            if run_id == -1:
+                raise RuntimeError(
+                    f"[Sim2] Directory '{subdir.name}' in '{sim2_path}' contains "
+                    f"HDF5 files but does not match the expected 'run_NNN' pattern."
+                )
+            files_by_run[run_id] = run_files
+            print(f"  Sim2 run_{run_id:03d}: {len(run_files)} Files")
     else:
         files = sorted(glob.glob(os.path.join(sim2_path, 'output_t*.hdf5')))
         if not files:
@@ -627,22 +719,18 @@ def load_all_nc_data_from_sim1(
     material_mapping_path: str,
     volume_mapping_path: str,
     nested: bool = False
-) -> tuple[dict[tuple[int, int], dict], dict[tuple[int, int], int]]:
+) -> dict[tuple[int, int, int], dict]:
     """
     Lädt alle NC-Daten aus allen Sim1-Files.
 
     Returns:
-        nc_data_dict: {(run_id, orig_muon_id, nC_id): {nc_info...}}
-        global_muon_id_map: {(run_id, orig_muon_id): global_muon_id}
+        nc_data_dict: {(run_id, muon_id, nC_id): {nc_info...}}
 
-    Keys sind (run_id, orig_muon_id, nC_id) um innerhalb eines Runs
-    eindeutig zu matchen.
+    Keys sind (run_id, muon_id, nC_id) um über alle Runs eindeutig zu matchen.
     """
     print(f"\n=== Phase 1: Lade NC-Daten aus {len(sim1_files)} Sim1-Files ===")
     phase1_start = time.time()
     nc_data_dict = {}
-    global_muon_id_map: dict[tuple[int, int], int] = {}
-    next_global_muon_id = 0
     duplicate_count = 0
 
     def _get_run_id(file_path: str) -> int:
@@ -698,16 +786,10 @@ def load_all_nc_data_from_sim1(
                 )
 
                 for idx in range(len(nc_evtid)):
-                    orig_muon_id = int(nc_evtid[idx])
+                    muon_id = int(nc_evtid[idx])
                     nc_id = int(nc_nC_id[idx])
 
-                    # Globale Muon-ID vergeben
-                    muon_key = (run_id, orig_muon_id)
-                    if muon_key not in global_muon_id_map:
-                        global_muon_id_map[muon_key] = next_global_muon_id
-                        next_global_muon_id += 1
-
-                    key = (run_id, orig_muon_id, nc_id)
+                    key = (run_id, muon_id, nc_id)
 
                     if key in nc_data_dict:
                         duplicate_count += 1
@@ -716,7 +798,6 @@ def load_all_nc_data_from_sim1(
                     nc_data_dict[key] = {
                         'file_idx': file_idx,
                         'run_id': run_id,
-                        'global_muon_id': global_muon_id_map[muon_key],
                         'nC_x': nC_x[idx],
                         'nC_y': nC_y[idx],
                         'nC_z': nC_z[idx],
@@ -741,9 +822,8 @@ def load_all_nc_data_from_sim1(
 
     phase1_elapsed = time.time() - phase1_start
     print(f"  ✓ {len(nc_data_dict)} einzigartige NC-Events geladen in {phase1_elapsed/60:.1f} min")
-    print(f"  ✓ {len(global_muon_id_map)} einzigartige Muonen → globale IDs 0..{next_global_muon_id - 1}")
     print_memory_usage("Nach Phase 1")
-    return nc_data_dict, global_muon_id_map
+    return nc_data_dict
 
 # ============================================================================
 # Phase 2: Sim2-Files sequenziell scannen und Voxel-Hits aggregieren
@@ -1041,6 +1121,7 @@ def write_output_in_batches(
         phi_data_batch = []
         target_data_batch = []
         target_regions_batch = []
+        event_ids_batch = []
 
         for key in batch_keys:
             run_id, muon_id, nc_id = key
@@ -1090,14 +1171,13 @@ def write_output_in_batches(
             p_mean_r = np.mean(p_r_values) if p_r_values else 0.0
             p_mean_z = np.mean(p_z_values) if p_z_values else 0.0
 
-            global_muon_id = nc_info['global_muon_id']
             nC_time = nc_info['nC_time']
             flag_ge77 = nc_info['nC_flag_Ge77']
 
             phi_row = [x, y, z, mat_id, vol_id, n_gamma, e_tot,
                        r_NC, phi_NC, dist_to_wall, dist_to_bot, dist_to_top,
                        p_mean_r, p_mean_z,
-                       global_muon_id, nC_time, flag_ge77] + gamma_row
+                       nC_time, flag_ge77] + gamma_row
 
             target_row = [voxel_counter.get(str(voxel_idx), 0) for voxel_idx in voxel_indices]
 
@@ -1115,19 +1195,21 @@ def write_output_in_batches(
             phi_data_batch.append(phi_row)
             target_data_batch.append(target_row)
             target_regions_batch.append(target_regions_row)
+            event_ids_batch.append([run_id, muon_id, nc_id])
 
         # Batch in HDF5 schreiben
         batch_result = {
             'phi_data': np.array(phi_data_batch, dtype=np.float32),
             'target_data': np.array(target_data_batch, dtype=np.int32),
             'target_regions': np.array(target_regions_batch, dtype=np.int32),
+            'event_ids': np.array(event_ids_batch, dtype=np.int64),
         }
 
         entries = append_results_to_hdf5(output_file, batch_result, voxel_indices, weight)
         total_written += entries
 
         # Batch-Speicher freigeben
-        del phi_data_batch, target_data_batch, target_regions_batch, batch_result
+        del phi_data_batch, target_data_batch, target_regions_batch, event_ids_batch, batch_result
         gc.collect()
 
         if (batch_idx + 1) % 10 == 0 or batch_idx == num_batches - 1:
@@ -1164,7 +1246,8 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
     if os.path.exists(output_file):
         try:
             with h5py.File(output_file, 'r') as f:
-                if 'phi_matrix' in f and 'target_matrix' in f and 'voxels' in f and 'voxel_metadata' in f:
+                if ('phi_matrix' in f and 'target_matrix' in f and
+                        'voxels' in f and 'voxel_metadata' in f and 'event_ids' in f):
                     print(f"Bestehende Output-Datei gefunden: {output_file}")
                     return output_file
         except:
@@ -1172,19 +1255,20 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
             os.remove(output_file)
 
     print(f"Erstelle neue Output-Datei: {output_file}")
-    
+
     voxel_indices = [voxel['index'] for voxel in voxel_data]
     n_voxels = len(voxel_indices)
 
     phi_columns = ["xNC_mm", "yNC_mm", "zNC_mm", "matID", "volID", "#gamma", "E_gamma_tot_keV",
                    "r_NC_mm", "phi_NC_rad", "dist_to_wall_mm", "dist_to_bot_mm", "dist_to_top_mm",
                    "p_mean_r", "p_mean_z",
-                   "global_muon_id", "nC_time_in_ns", "nC_flag_Ge77",
+                   "nC_time_in_ns", "nC_flag_Ge77",
                    "gammaE1_keV", "gammapx1", "gammapy1", "gammapz1",
                    "gammaE2_keV", "gammapx2", "gammapy2", "gammapz2",
                    "gammaE3_keV", "gammapx3", "gammapy3", "gammapz3",
                    "gammaE4_keV", "gammapx4", "gammapy4", "gammapz4"]
     region_columns = ['pit', 'bot', 'wall', 'top']
+    event_id_columns = ["run_id", "muon_id", "nc_id"]
 
     # 64-bit Offsets und Lengths im Superblock erzwingen (für Dateien >2GB)
     # Siehe: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t11.html
@@ -1221,11 +1305,22 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
             compression='lzf'
         )
 
+        # === Event ID Dataset (run_id, muon_id, nc_id) ===
+        out.create_dataset(
+            "event_ids",
+            shape=(0, len(event_id_columns)),
+            maxshape=(None, len(event_id_columns)),
+            dtype=np.int64,
+            chunks=(1000, len(event_id_columns)),
+            compression='lzf'
+        )
+
         # === Spalten-Metadaten ===
         dt = h5py.string_dtype(encoding='utf-8')
         out.create_dataset("target_columns", data=[str(idx) for idx in voxel_indices], dtype=dt)
         out.create_dataset("phi_columns", data=phi_columns, dtype=dt)
         out.create_dataset("region_columns", data=region_columns, dtype=dt)
+        out.create_dataset("event_id_columns", data=event_id_columns, dtype=dt)
 
         # === Statische Daten ===
         theta_grp = out.create_group("theta")
@@ -1296,6 +1391,7 @@ def append_results_to_hdf5(output_file, result_data, voxel_indices, weight):
     phi_data = result_data['phi_data']
     target_data = result_data['target_data']
     target_regions_data = result_data.get('target_regions')
+    event_ids_data = result_data.get('event_ids')
     num_entries = len(phi_data)
 
     if num_entries == 0:
@@ -1321,6 +1417,12 @@ def append_results_to_hdf5(output_file, result_data, voxel_indices, weight):
             dset = out['region_matrix']
             dset.resize((new_size, dset.shape[1]))
             dset[old_size:new_size, :] = target_regions_data
+
+        # Event IDs erweitern
+        if event_ids_data is not None and len(event_ids_data) > 0:
+            dset = out['event_ids']
+            dset.resize((new_size, dset.shape[1]))
+            dset[old_size:new_size, :] = event_ids_data
 
         # Weights erweitern
         dset = out['weights']
@@ -1418,6 +1520,17 @@ def main():
 
     os.makedirs(args.output, exist_ok=True)
 
+    # === Run Structure Validation ===
+    if args.nested:
+        print("\n=== Validiere Run-Verzeichnisstruktur ===")
+        validate_run_structure(args.input_sim1, nested=True, label="Sim1")
+        validate_run_structure(args.input_sim2, nested=True, label="Sim2")
+        print("=== Prüfe Konsistenz zwischen Sim1 und Sim2 ===")
+        validate_sim1_sim2_consistency(args.input_sim1, args.input_sim2)
+    else:
+        validate_run_structure(args.input_sim1, nested=False, label="Sim1")
+        validate_run_structure(args.input_sim2, nested=False, label="Sim2")
+
     # Geometrie
     geometry_result = defineZylinder(args.geometry, args.valid_detectors)
     (t_zylinder, l_voxel, t_voxel, r_pit, dz_pit, r_zyl_bot, r_zyl_top,
@@ -1498,7 +1611,7 @@ def main():
 
     try:
         # Phase 1: NC-Daten aus Sim1 laden
-        nc_data_dict, global_muon_id_map = load_all_nc_data_from_sim1(
+        nc_data_dict = load_all_nc_data_from_sim1(
             sim1_files, args.material_mapping, args.volume_mapping,
             nested=args.nested
         )
@@ -1527,7 +1640,7 @@ def main():
         total_entries = output_stats['total_written']
 
         # Speicher freigeben
-        del nc_data_dict, nc_voxel_counters, global_muon_id_map
+        del nc_data_dict, nc_voxel_counters
         gc.collect()
 
         progress_tracker.verify_hdf5_integrity(output_file)
