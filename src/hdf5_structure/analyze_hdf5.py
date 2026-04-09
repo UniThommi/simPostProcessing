@@ -1,9 +1,16 @@
-#Author: Thomas Buerger (University of Tübingen)
+# Author: Thomas Buerger (University of Tübingen)
+#
+# Usage:
+#   python src/hdf5_structure/analyze_hdf5.py /path/to/file.hdf5
+#   python src/hdf5_structure/analyze_hdf5.py /path/to/file.hdf5 --output my_structure.txt
+#
+# Output is written to hdf5_structure.txt by default (or the path given via --output).
 
+import argparse
 import h5py
 from pathlib import Path
 
-OUTPUT_FILE = "hdf5_structure.txt"
+DEFAULT_OUTPUT_FILE = "hdf5_structure.txt"
 
 def analyze_hdf5_structure(file_path, output_file):
     """
@@ -66,9 +73,13 @@ def analyze_hdf5_structure(file_path, output_file):
 
 
 if __name__ == "__main__":
-    file_path = Path(
-        "/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/MLFormatMusunNCsZylSSD300PMTs/ncscore_output_0.hdf5"
+    parser = argparse.ArgumentParser(description="Analyze the structure of an HDF5 file.")
+    parser.add_argument("hdf5_file", type=Path, help="Path to the HDF5 file to analyze.")
+    parser.add_argument(
+        "--output", type=Path, default=DEFAULT_OUTPUT_FILE,
+        help=f"Output text file (default: {DEFAULT_OUTPUT_FILE})."
     )
+    args = parser.parse_args()
 
-    analyze_hdf5_structure(file_path, OUTPUT_FILE)
-    print(f"Done. Structure written to {OUTPUT_FILE}.")
+    analyze_hdf5_structure(args.hdf5_file, args.output)
+    print(f"Done. Structure written to {args.output}.")
