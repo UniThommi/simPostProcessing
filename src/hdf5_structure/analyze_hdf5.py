@@ -28,20 +28,26 @@ def analyze_hdf5_structure(file_path, output_file):
         if isinstance(obj, h5py.Dataset):
             write(f"{indent}- Dataset: {name}  shape={obj.shape}  dtype={obj.dtype}")
 
-            # Prüfe ob zugehöriges _columns Dataset existiert
+            # Look for an associated _columns dataset using common naming conventions
             parent = obj.parent
             base = name.rsplit("/", 1)[-1]
-            if base.endswith("_matrix"):
-                col_key = base.replace("_matrix", "_columns")
-                if col_key in parent:
-                    cols = parent[col_key][:]
-                    cols = [c.decode() if isinstance(c, bytes) else c for c in cols]
-                    total_cols = len(cols)
-                    if total_cols > 40:
-                        display = cols[:5]
-                        write(f"{indent}  Columns ({total_cols}): {display} ... and {total_cols - 5} more")
-                    else:
-                        write(f"{indent}  Columns ({total_cols}): {list(cols)}")
+            candidates = [
+                f"{base}_columns",                    # generic: x -> x_columns
+                base.replace("_matrix", "_columns"),  # matrix convention: x_matrix -> x_columns
+            ]
+            if base.endswith("s"):
+                candidates.append(f"{base[:-1]}_columns")  # plural: x_ids -> x_id_columns
+
+            col_key = next((c for c in candidates if c != base and c in parent), None)
+            if col_key:
+                cols = parent[col_key][:]
+                cols = [c.decode() if isinstance(c, bytes) else c for c in cols]
+                total_cols = len(cols)
+                if total_cols > 40:
+                    display = cols[:5]
+                    write(f"{indent}  Columns ({total_cols}): {display} ... and {total_cols - 5} more")
+                else:
+                    write(f"{indent}  Columns ({total_cols}): {list(cols)}")
             return
 
         if isinstance(obj, h5py.Group):
