@@ -1,0 +1,78 @@
+=== HDF5 Structure (compressed) ===
+- Group: /  (#entries: 15)
+  - Dataset: //event_id_columns  shape=(3,)  dtype=object
+  - Dataset: //event_ids  shape=(14329397, 3)  dtype=int64
+    Columns (3): ['run_id', 'muon_id', 'nc_id']
+  - Group: //mat_map  (#entries: 14)
+    - Dataset: //mat_map/EnrichedGermanium0.913  shape=()  dtype=int64
+    - Dataset: //mat_map/LiquidArgon  shape=()  dtype=int64
+    - Dataset: //mat_map/Water  shape=()  dtype=int64
+    - Dataset: //mat_map/metal_copper  shape=()  dtype=int64
+    - Dataset: //mat_map/metal_steel  shape=()  dtype=int64
+    - Dataset: //mat_map/my_tyvek  shape=()  dtype=int64
+    - Dataset: //mat_map/noMaterial  shape=()  dtype=int64
+    - Dataset: //mat_map/pen  shape=()  dtype=int64
+    - Dataset: //mat_map/pmma  shape=()  dtype=int64
+    - Dataset: //mat_map/pmma_cl2  shape=()  dtype=int64
+    - Dataset: //mat_map/ps_fibers  shape=()  dtype=int64
+    - Dataset: //mat_map/tpb_on_fibers  shape=()  dtype=int64
+    - Dataset: //mat_map/tyvek  shape=()  dtype=int64
+    - Dataset: //mat_map/ultem  shape=()  dtype=int64
+  - Dataset: //phi_columns  shape=(32,)  dtype=object
+  - Dataset: //phi_matrix  shape=(14329397, 32)  dtype=float32
+    Columns (32): ['xNC_mm', 'yNC_mm', 'zNC_mm', 'matID', 'volID', '#gamma', 'E_gamma_tot_keV', 'r_NC_mm', 'phi_NC_rad', 'dist_to_wall_mm', 'dist_to_bot_mm', 'dist_to_top_mm', 'p_mean_r', 'p_mean_z', 'nC_time_in_ns', 'nC_flag_Ge77', 'gammaE1_keV', 'gammapx1', 'gammapy1', 'gammapz1', 'gammaE2_keV', 'gammapx2', 'gammapy2', 'gammapz2', 'gammaE3_keV', 'gammapx3', 'gammapy3', 'gammapz3', 'gammaE4_keV', 'gammapx4', 'gammapy4', 'gammapz4']
+  - Dataset: //primaries  shape=()  dtype=int64
+  - Dataset: //region_columns  shape=(4,)  dtype=object
+  - Dataset: //region_matrix  shape=(14329397, 4)  dtype=int32
+    Columns (4): ['pit', 'bot', 'wall', 'top']
+  - Dataset: //target_columns  shape=(9583,)  dtype=object
+  - Dataset: //target_matrix  shape=(14329397, 9583)  dtype=int32
+    Columns (9583): ['000013', '000014', '000015', '000016', '000017'] ... and 9578 more
+  - Group: //theta  (#entries: 1)
+    - Dataset: //theta/inner_radius_in_mm  shape=()  dtype=int64
+  - Group: //vol_map  (#entries: 576)
+    - Dataset: //vol_map/S0401T_wrap  shape=()  dtype=int64
+    - Dataset: //vol_map/S0902B_wrap  shape=()  dtype=int64
+    - Dataset: //vol_map/S1303B_wrap  shape=()  dtype=int64
+    - Dataset: //vol_map/S1403B_wrap  shape=()  dtype=int64
+    - Dataset: //vol_map/S2401T_wrap  shape=()  dtype=int64
+    ... and 571 more entries ...
+  - Dataset: //voxel_metadata  shape=(9583, 7)  dtype=float32
+  - Group: //voxels  (#entries: 9583)
+    - Group: //voxels/000013  (#entries: 3)
+      - Dataset: //voxels/000013/center  shape=(3,)  dtype=float32
+      - Group: //voxels/000013/corners  (#entries: 3)
+        - Dataset: //voxels/000013/corners/x  shape=(8,)  dtype=float64
+        - Dataset: //voxels/000013/corners/y  shape=(8,)  dtype=float64
+        - Dataset: //voxels/000013/corners/z  shape=(8,)  dtype=float64
+      - Dataset: //voxels/000013/layer  shape=()  dtype=object
+    - Group: //voxels/000014  (#entries: 3)
+      - Dataset: //voxels/000014/center  shape=(3,)  dtype=float32
+      - Group: //voxels/000014/corners  (#entries: 3)
+        - Dataset: //voxels/000014/corners/x  shape=(8,)  dtype=float64
+        - Dataset: //voxels/000014/corners/y  shape=(8,)  dtype=float64
+        - Dataset: //voxels/000014/corners/z  shape=(8,)  dtype=float64
+      - Dataset: //voxels/000014/layer  shape=()  dtype=object
+    - Group: //voxels/000015  (#entries: 3)
+      - Dataset: //voxels/000015/center  shape=(3,)  dtype=float32
+      - Group: //voxels/000015/corners  (#entries: 3)
+        - Dataset: //voxels/000015/corners/x  shape=(8,)  dtype=float64
+        - Dataset: //voxels/000015/corners/y  shape=(8,)  dtype=float64
+        - Dataset: //voxels/000015/corners/z  shape=(8,)  dtype=float64
+      - Dataset: //voxels/000015/layer  shape=()  dtype=object
+    - Group: //voxels/000016  (#entries: 3)
+      - Dataset: //voxels/000016/center  shape=(3,)  dtype=float32
+      - Group: //voxels/000016/corners  (#entries: 3)
+        - Dataset: //voxels/000016/corners/x  shape=(8,)  dtype=float64
+        - Dataset: //voxels/000016/corners/y  shape=(8,)  dtype=float64
+        - Dataset: //voxels/000016/corners/z  shape=(8,)  dtype=float64
+      - Dataset: //voxels/000016/layer  shape=()  dtype=object
+    - Group: //voxels/000017  (#entries: 3)
+      - Dataset: //voxels/000017/center  shape=(3,)  dtype=float32
+      - Group: //voxels/000017/corners  (#entries: 3)
+        - Dataset: //voxels/000017/corners/x  shape=(8,)  dtype=float64
+        - Dataset: //voxels/000017/corners/y  shape=(8,)  dtype=float64
+        - Dataset: //voxels/000017/corners/z  shape=(8,)  dtype=float64
+      - Dataset: //voxels/000017/layer  shape=()  dtype=object
+    ... and 9578 more entries ...
+  - Dataset: //weights  shape=(14329397,)  dtype=float32
