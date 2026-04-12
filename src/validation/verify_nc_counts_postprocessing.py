@@ -202,9 +202,8 @@ def count_postprocessed_entries(output_path: Path) -> Dict[str, int]:
         try:
             with h5py.File(train_file, 'r') as f:
                 # Jeder Eintrag = ein Neutron Capture
-                # Wir können eine beliebige phi-Spalte nehmen
-                if 'phi' in f and 'xNC_mm' in f['phi']:
-                    n_entries = len(f['phi']['xNC_mm'][:])
+                if 'phi_matrix' in f:
+                    n_entries = f['phi_matrix'].shape[0]
                     counts['train'] += n_entries
                     print(f"  {train_file.name}: {n_entries} Einträge")
                 else:
@@ -214,13 +213,13 @@ def count_postprocessed_entries(output_path: Path) -> Dict[str, int]:
             print(f"     Fehler: {e}")
             print(f"     Pfad: {train_file.absolute()}")
             raise RuntimeError(f"Train-Datei ist korrupt: {train_file}") from e
-    
+
     # Zähle Validation Einträge
     for val_file in val_files:
         try:
             with h5py.File(val_file, 'r') as f:
-                if 'phi' in f and 'xNC_mm' in f['phi']:
-                    n_entries = len(f['phi']['xNC_mm'][:])
+                if 'phi_matrix' in f:
+                    n_entries = f['phi_matrix'].shape[0]
                     counts['validation'] += n_entries
                     print(f"  {val_file.name}: {n_entries} Einträge")
                 else:

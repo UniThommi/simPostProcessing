@@ -648,7 +648,8 @@ def process_single_file(args):
         nc_material_ids = f['hit']['MyNeutronCaptureOutput']['nC_material_id']['pages'][:]
         nc_volume_ids = f['hit']['MyNeutronCaptureOutput']['nC_phys_vol_id']['pages'][:]
         nc_time = f['hit']['MyNeutronCaptureOutput']['nC_time_in_ns']['pages'][:]
-        
+        nc_flag_ge77 = f['hit']['MyNeutronCaptureOutput']['nC_flag_Ge77']['pages'][:]
+
         # Gamma-Daten lesen (1-4)
         gamma_data_nc = {}
         for i in range(1, 5):
@@ -679,9 +680,10 @@ def process_single_file(args):
             key = (nc_evtid[idx], nc_nC_id[idx])
             nc_data_dict[key] = {
                 'nC_x': nC_x[idx],
-                'nC_y': nC_y[idx], 
+                'nC_y': nC_y[idx],
                 'nC_z': nC_z[idx],
                 'nC_time': nc_time[idx],
+                'nC_flag_Ge77': int(nc_flag_ge77[idx]),
                 'gamma_amount': gamma_amount[idx],
                 'gamma_tot_energy': gamma_tot_energy[idx],
                 'material_id': globalMaterialIDs[idx],
@@ -910,9 +912,10 @@ def process_single_file(args):
         p_mean_r = np.mean(p_r_values) if p_r_values else 0.0
         p_mean_z = np.mean(p_z_values) if p_z_values else 0.0
         
-        phi_row = [x, y, z, mat_id, vol_id, n_gamma, e_tot, 
+        phi_row = [x, y, z, mat_id, vol_id, n_gamma, e_tot,
                    r_NC, phi_NC, dist_to_wall, dist_to_bot, dist_to_top,
-                   p_mean_r, p_mean_z] + gamma_row
+                   p_mean_r, p_mean_z,
+                   nc_info['nC_time'], nc_info['nC_flag_Ge77']] + gamma_row
         
         target_row = [voxel_counter.get(str(voxel_idx), 0) for voxel_idx in voxel_indices]
         
@@ -1357,7 +1360,7 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
     
     Neues Format: Konsolidierte 2D-Arrays statt einzelner Datasets.
       - target_matrix: (n_events, n_voxels) int32
-      - phi_matrix: (n_events, 30) float32
+      - phi_matrix: (n_events, 32) float32
       - region_matrix: (n_events, 4) int32
       - target_columns: Liste der Voxel-Index-Strings (Spaltenreihenfolge)
       - phi_columns: Liste der Phi-Feature-Namen (Spaltenreihenfolge)
@@ -1385,6 +1388,7 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
         "xNC_mm", "yNC_mm", "zNC_mm", "matID", "volID", "#gamma", "E_gamma_tot_keV",
         "r_NC_mm", "phi_NC_rad", "dist_to_wall_mm", "dist_to_bot_mm", "dist_to_top_mm",
         "p_mean_r", "p_mean_z",
+        "nC_time_in_ns", "nC_flag_Ge77",
         "gammaE1_keV", "gammapx1", "gammapy1", "gammapz1",
         "gammaE2_keV", "gammapx2", "gammapy2", "gammapz2",
         "gammaE3_keV", "gammapx3", "gammapy3", "gammapz3",

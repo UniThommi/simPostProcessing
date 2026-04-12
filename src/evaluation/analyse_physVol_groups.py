@@ -284,41 +284,38 @@ class VolumeHitAnalyzer:
         
         with h5py.File(hdf5_path, 'r') as f:
             # Get dataset dimensions
-            n_events = len(f['phi']['volID'])
-            
-            # Get voxel IDs (small, can load fully)
-            voxel_ids = sorted([int(k) for k in f['target'].keys()])
-            n_voxels = len(voxel_ids)
-            
+            n_events, n_voxels = f['target_matrix'].shape
+
+            # Resolve column index for volID from metadata
+            phi_columns = [c.decode() if isinstance(c, bytes) else c
+                           for c in f['phi_columns'][:]]
+            volID_idx = phi_columns.index('volID')
+
             print(f"  Total events: {n_events:,}")
             print(f"  Total voxels: {n_voxels:,}")
-            
+
             # Calculate optimal chunk size
             if chunk_size is None:
                 chunk_size = get_optimal_chunk_size(n_events, n_voxels)
-            
+
             n_chunks = int(np.ceil(n_events / chunk_size))
             print(f"  Processing in {n_chunks} chunk(s)\n")
-            
+
             # Process chunks
             for chunk_idx in range(n_chunks):
                 chunk_start = chunk_idx * chunk_size
                 chunk_end = min(chunk_start + chunk_size, n_events)
                 chunk_size_actual = chunk_end - chunk_start
-                
+
                 print(f"  Chunk {chunk_idx+1}/{n_chunks}: "
                       f"Events {chunk_start:,} - {chunk_end:,} "
                       f"({chunk_size_actual:,} events)")
-                
+
                 # Load ONLY this chunk's data
-                vol_ids_chunk = f['phi']['volID'][chunk_start:chunk_end]
-                
-                # Load target data for this chunk
-                # Strategy: Load each voxel column as needed
-                target_chunk = np.zeros((chunk_size_actual, n_voxels), dtype=np.int32)
-                
-                for voxel_idx, voxel_id in enumerate(voxel_ids):
-                    target_chunk[:, voxel_idx] = f['target'][str(voxel_id)][chunk_start:chunk_end]
+                vol_ids_chunk = f['phi_matrix'][chunk_start:chunk_end, volID_idx]
+
+                # Load target data for this chunk as a single 2D slice
+                target_chunk = f['target_matrix'][chunk_start:chunk_end, :]
                 
                 # Process events in this chunk
                 for local_idx in range(chunk_size_actual):

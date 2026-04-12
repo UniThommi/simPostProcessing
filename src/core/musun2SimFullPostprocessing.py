@@ -1237,7 +1237,7 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
     
     Konsolidiertes 2D-Format:
       - target_matrix: (n_events, n_voxels) int32
-      - phi_matrix: (n_events, 33) float32
+      - phi_matrix: (n_events, 32) float32
       - region_matrix: (n_events, 4) int32
       - target_columns, phi_columns, region_columns: Spalten-Metadaten
     """
