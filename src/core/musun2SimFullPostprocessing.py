@@ -1232,7 +1232,7 @@ def write_output_in_batches(
 # HDF5 Output (identisch zum Single-Sim Script)
 # ============================================================================
 
-def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol_map, radius, suffix=""):
+def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol_map, radius, n_primaries=0, suffix=""):
     """Erstellt eine neue HDF5-Datei oder öffnet eine bestehende.
     
     Konsolidiertes 2D-Format:
@@ -1325,7 +1325,7 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
         # === Statische Daten ===
         theta_grp = out.create_group("theta")
         theta_grp.create_dataset("inner_radius_in_mm", data=radius)
-        out.create_dataset("primaries", data=0)
+        out.create_dataset("primaries", data=n_primaries)
 
         mat_map_grp = out.create_group("mat_map")
         for key, value in mat_map.items():
@@ -1495,6 +1495,8 @@ Beispiele:
                         help='Liste der gültigen Detector UIDs')
     parser.add_argument('--verbose', '-V', action='store_true',
                         help='Ausführliche Ausgabe')
+    parser.add_argument('--muons-per-run', type=int, required=True,
+                        help='Anzahl simulierter Myonen pro Run (für primaries-Dataset im Output)')
 
     return parser.parse_args()
 
@@ -1565,6 +1567,9 @@ def main():
         sys.exit(1)
     print(f"Sim2: {total_sim2_files} Dateien in {len(sim2_files_by_run)} Runs gefunden")
 
+    if len(sim1_files) != total_sim2_files:
+        print(f"  WARNING: Sim1 hat {len(sim1_files)} Files, Sim2 hat {total_sim2_files} Files — Anzahl stimmt nicht überein!")
+
     # Output-Dateien
     output_file = os.path.join(args.output, "ncscore_output_0.hdf5")
 
@@ -1599,9 +1604,10 @@ def main():
     weight = calculate_weight_from_files(sim1_files, sample_size)
 
     # === Output-Dateien erstellen ===
+    n_primaries = len(sim1_files) * args.muons_per_run
     output_file = create_or_open_output_file(
         args.output, 0, voxel_data, global_material_mapping,
-        global_volume_mapping, r_zylinder
+        global_volume_mapping, r_zylinder, n_primaries=n_primaries
     )
 
     # =======================================================================

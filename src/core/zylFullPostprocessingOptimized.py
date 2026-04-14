@@ -1740,10 +1740,17 @@ def main():
     print(f"Nicht zugeordnete Punkte: {final_stats['total_unassigned']}")
     print(f"Gesamtlaufzeit: {final_stats['elapsed_time']/60:.1f} min")
     print(f"Durchschnitt pro File: {final_stats['elapsed_time']/max(1,final_stats['completed']):.2f}s")
-    print(f"Output-Dateien:")                                            
-    print(f"  Training: {output_file_train}")                            
+    print(f"Output-Dateien:")
+    print(f"  Training: {output_file_train}")
     print(f"  Validation: {output_file_val}")
-    
+
+    # primaries = Anzahl verarbeiteter NC-Events (eindeutige run_id + evtid Paare)
+    for out_path in [output_file_train, output_file_val]:
+        if os.path.exists(out_path):
+            with h5py.File(out_path, 'a') as f:
+                f['primaries'][()] = total_entries
+    print(f"primaries gesetzt: {total_entries} NC-Events")
+
     # Aufräumen nach erfolgreichem Abschluss
     if final_stats['completed'] == len(files) and final_stats['failed'] == 0:
         print(f"\nAlle Files erfolgreich verarbeitet - räume temporäre Dateien auf...")
