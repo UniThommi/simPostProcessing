@@ -401,13 +401,18 @@ def validate_run_structure(path: str, nested: bool, label: str):
                 f"output_*.hdf5 files found in '{path}'"
             )
 
-        for subdir in dirs_with_files:
-            if not _RUN_DIR_PATTERN.match(subdir.name):
-                raise RuntimeError(
-                    f"[{label}] Directory '{subdir.name}' in '{path}' contains "
-                    f"HDF5 files but does not match the expected 'run_NNN' pattern. "
-                    f"All run directories must follow this naming convention."
-                )
+        ignored = [s for s in dirs_with_files if not _RUN_DIR_PATTERN.match(s.name)]
+        dirs_with_files = [s for s in dirs_with_files if _RUN_DIR_PATTERN.match(s.name)]
+
+        if ignored:
+            print(f"[{label}] Ignoriere {len(ignored)} Verzeichnis(se) ohne run_NNN-Namen: "
+                  f"{[s.name for s in ignored]}")
+
+        if not dirs_with_files:
+            raise RuntimeError(
+                f"[{label}] No subdirectories matching 'run_NNN' with output_*.hdf5 files "
+                f"found in '{path}'"
+            )
 
         print(f"[{label}] Run structure OK: {len(dirs_with_files)} run directories")
         for subdir in dirs_with_files:
