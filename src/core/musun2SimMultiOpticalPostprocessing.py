@@ -486,6 +486,77 @@ def validate_sim1_sim2_consistency(sim1_path: str, sim2_path: str):
         print(f"  Sim1/Sim2 run directories match: {sorted(sim1_runs)}")
 
 
+def validate_sim1_sim3_consistency(sim1_path: str, sim3_path: str):
+    """
+    Checks consistency between Sim1 (run_NNN/) and Sim3 (run_NNN/sim_NNN/).
+
+    For each run_NNN that exists in Sim3, every individual sim_NNN subdirectory
+    is verified against Sim1 — not just the top-level run directory.
+    Additionally warns if the set of sim_NNN directories differs across runs,
+    since all runs should contain the same number of independent optical sims.
+    """
+    sim1_runs = {
+        d.name for d in Path(sim1_path).iterdir()
+        if d.is_dir() and _RUN_DIR_PATTERN.match(d.name)
+    }
+
+    # Collect {run_name: {sim_name, ...}} for Sim3
+    sim3_run_to_sims: dict[str, set[str]] = {}
+    for run_dir in sorted(Path(sim3_path).iterdir()):
+        if not run_dir.is_dir() or not _RUN_DIR_PATTERN.match(run_dir.name):
+            continue
+        sim_names = {
+            d.name for d in run_dir.iterdir()
+            if d.is_dir() and _SIM_DIR_PATTERN.match(d.name)
+        }
+        if sim_names:
+            sim3_run_to_sims[run_dir.name] = sim_names
+
+    sim3_runs = set(sim3_run_to_sims.keys())
+
+    # Top-level run mismatches
+    only_in_sim1 = sim1_runs - sim3_runs
+    only_in_sim3 = sim3_runs - sim1_runs
+
+    if only_in_sim1:
+        print(f"  WARNING: Runs in Sim1 without matching Sim3 directory "
+              f"(NC events get no Sim3 photons): {sorted(only_in_sim1)}")
+    if only_in_sim3:
+        print(f"  WARNING: Runs in Sim3 without matching Sim1 directory "
+              f"(Sim3 photon data will be ignored): {sorted(only_in_sim3)}")
+
+    # Per-run sim_NNN check: each sim individually verified against Sim1
+    matching_runs = sim1_runs & sim3_runs
+    all_sim_sets = [sim3_run_to_sims[r] for r in sorted(matching_runs)]
+
+    if all_sim_sets:
+        reference_sims = all_sim_sets[0]
+        reference_run = sorted(matching_runs)[0]
+        inconsistent_runs = []
+        for run_name in sorted(matching_runs):
+            sims = sim3_run_to_sims[run_name]
+            missing = reference_sims - sims
+            extra = sims - reference_sims
+            if missing or extra:
+                inconsistent_runs.append((run_name, missing, extra))
+            else:
+                # Each sim_NNN in this run has a matching run_NNN in Sim1 ✓
+                pass
+
+        if inconsistent_runs:
+            print(f"  WARNING: sim_NNN sets differ across runs "
+                  f"(reference: {reference_run} with {sorted(reference_sims)}):")
+            for run_name, missing, extra in inconsistent_runs:
+                if missing:
+                    print(f"    {run_name}: missing sim dirs: {sorted(missing)}")
+                if extra:
+                    print(f"    {run_name}: extra sim dirs:   {sorted(extra)}")
+        else:
+            n_sims = len(reference_sims)
+            print(f"  Sim1/Sim3 consistent: {len(matching_runs)} matching runs, "
+                  f"each with {n_sims} sim_*** directories ({sorted(reference_sims)[0]} … {sorted(reference_sims)[-1]})")
+
+
 # ============================================================================
 # File Discovery
 # ============================================================================
@@ -1563,6 +1634,8 @@ def main():
 
     print("\n=== Validiere Sim3-Struktur (run_NNN/sim_NNN/) ===")
     sim3_summary = validate_sim3_structure(args.input_sim3)
+    print("=== Prüfe Konsistenz Sim1 ↔ Sim3 ===")
+    validate_sim1_sim3_consistency(args.input_sim1, args.input_sim3)
 
     # === Geometrie ===
     geometry_result = defineZylinder(args.geometry, args.valid_detectors)
