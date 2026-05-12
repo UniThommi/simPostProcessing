@@ -374,6 +374,17 @@ def _parse_run_id_from_name(name: str) -> int:
     return -1
 
 
+def _extract_run_id_from_path(file_path: str) -> int:
+    """Returns the run_id embedded in a path like .../run_003/output_t0.hdf5 → 3."""
+    for part in Path(file_path).parts:
+        if part.startswith("run_"):
+            try:
+                return int(part.split("_")[1])
+            except (IndexError, ValueError):
+                pass
+    return 0
+
+
 def validate_run_structure(path: str, nested: bool, label: str):
     p = Path(path)
     if nested:
@@ -486,75 +497,93 @@ def validate_sim1_sim2_consistency(sim1_path: str, sim2_path: str):
         print(f"  Sim1/Sim2 run directories match: {sorted(sim1_runs)}")
 
 
-def validate_sim1_sim3_consistency(sim1_path: str, sim3_path: str):
+def validate_sim1_sim3_consistency(sim1_path: str, sim3_path: str,
+                                    active_run_ids: set[int]) -> None:
     """
-    Checks consistency between Sim1 (run_NNN/) and Sim3 (run_NNN/sim_NNN/).
+    Validates the active runs (selected via --sim3-runs) against Sim1 and Sim3.
 
-    For each run_NNN that exists in Sim3, every individual sim_NNN subdirectory
-    is verified against Sim1 — not just the top-level run directory.
-    Additionally warns if the set of sim_NNN directories differs across runs,
-    since all runs should contain the same number of independent optical sims.
+    Aborts (raises RuntimeError) if:
+      - An active run_id is missing from Sim1.
+      - An active run_id is missing from Sim3 or has no sim_NNN subdirectories.
+      - The sim_NNN sets differ across active runs (unequal optical simulation counts).
+
+    Prints a clear summary of which runs are active, and reports any inactive
+    runs in Sim1/Sim3 as informational messages only.
     """
-    sim1_runs = {
+    sim1_run_names = {
         d.name for d in Path(sim1_path).iterdir()
         if d.is_dir() and _RUN_DIR_PATTERN.match(d.name)
     }
+    sim1_run_ids = {_parse_run_id_from_name(n) for n in sim1_run_names}
 
-    # Collect {run_name: {sim_name, ...}} for Sim3
-    sim3_run_to_sims: dict[str, set[str]] = {}
+    # Collect {run_id: {sim_name, ...}} for all runs present in Sim3
+    sim3_run_to_sims: dict[int, set[str]] = {}
     for run_dir in sorted(Path(sim3_path).iterdir()):
         if not run_dir.is_dir() or not _RUN_DIR_PATTERN.match(run_dir.name):
             continue
+        run_id = _parse_run_id_from_name(run_dir.name)
         sim_names = {
             d.name for d in run_dir.iterdir()
             if d.is_dir() and _SIM_DIR_PATTERN.match(d.name)
         }
         if sim_names:
-            sim3_run_to_sims[run_dir.name] = sim_names
+            sim3_run_to_sims[run_id] = sim_names
 
-    sim3_runs = set(sim3_run_to_sims.keys())
+    # --- Hard checks for each active run ---
+    errors = []
+    for run_id in sorted(active_run_ids):
+        run_name = f"run_{run_id:03d}"
+        if run_id not in sim1_run_ids:
+            errors.append(f"  FEHLER: {run_name} ist aktiv, aber fehlt in Sim1 ({sim1_path})")
+        if run_id not in sim3_run_to_sims:
+            errors.append(f"  FEHLER: {run_name} ist aktiv, aber fehlt in Sim3 ({sim3_path})")
+        elif not sim3_run_to_sims[run_id]:
+            errors.append(f"  FEHLER: {run_name}/sim_*** in Sim3 enthält keine sim_NNN-Verzeichnisse")
 
-    # Top-level run mismatches
-    only_in_sim1 = sim1_runs - sim3_runs
-    only_in_sim3 = sim3_runs - sim1_runs
+    if errors:
+        raise RuntimeError(
+            "Konsistenzprüfung Sim1 ↔ Sim3 fehlgeschlagen:\n" + "\n".join(errors)
+        )
 
-    if only_in_sim1:
-        print(f"  WARNING: Runs in Sim1 without matching Sim3 directory "
-              f"(NC events get no Sim3 photons): {sorted(only_in_sim1)}")
-    if only_in_sim3:
-        print(f"  WARNING: Runs in Sim3 without matching Sim1 directory "
-              f"(Sim3 photon data will be ignored): {sorted(only_in_sim3)}")
+    # --- Hard check: all active runs must have the same sim_NNN set ---
+    active_sim_sets = {run_id: sim3_run_to_sims[run_id] for run_id in active_run_ids}
+    reference_id = sorted(active_run_ids)[0]
+    reference_sims = active_sim_sets[reference_id]
+    inconsistent = []
+    for run_id in sorted(active_run_ids):
+        sims = active_sim_sets[run_id]
+        missing = reference_sims - sims
+        extra = sims - reference_sims
+        if missing or extra:
+            inconsistent.append((run_id, missing, extra))
 
-    # Per-run sim_NNN check: each sim individually verified against Sim1
-    matching_runs = sim1_runs & sim3_runs
-    all_sim_sets = [sim3_run_to_sims[r] for r in sorted(matching_runs)]
+    if inconsistent:
+        lines = [
+            f"  FEHLER: sim_NNN-Sets der aktiven Runs stimmen nicht überein "
+            f"(Referenz: run_{reference_id:03d} mit {sorted(reference_sims)}):"
+        ]
+        for run_id, missing, extra in inconsistent:
+            if missing:
+                lines.append(f"    run_{run_id:03d}: fehlende sim-Dirs: {sorted(missing)}")
+            if extra:
+                lines.append(f"    run_{run_id:03d}: extra sim-Dirs:    {sorted(extra)}")
+        raise RuntimeError("Konsistenzprüfung Sim1 ↔ Sim3 fehlgeschlagen:\n" + "\n".join(lines))
 
-    if all_sim_sets:
-        reference_sims = all_sim_sets[0]
-        reference_run = sorted(matching_runs)[0]
-        inconsistent_runs = []
-        for run_name in sorted(matching_runs):
-            sims = sim3_run_to_sims[run_name]
-            missing = reference_sims - sims
-            extra = sims - reference_sims
-            if missing or extra:
-                inconsistent_runs.append((run_name, missing, extra))
-            else:
-                # Each sim_NNN in this run has a matching run_NNN in Sim1 ✓
-                pass
+    # --- Informational: inactive runs in Sim1 ---
+    inactive_in_sim1 = sim1_run_ids - active_run_ids
+    if inactive_in_sim1:
+        print(f"  INFO: Folgende Sim1-Runs sind NICHT aktiv und werden übersprungen: "
+              f"{sorted(inactive_in_sim1)}")
 
-        if inconsistent_runs:
-            print(f"  WARNING: sim_NNN sets differ across runs "
-                  f"(reference: {reference_run} with {sorted(reference_sims)}):")
-            for run_name, missing, extra in inconsistent_runs:
-                if missing:
-                    print(f"    {run_name}: missing sim dirs: {sorted(missing)}")
-                if extra:
-                    print(f"    {run_name}: extra sim dirs:   {sorted(extra)}")
-        else:
-            n_sims = len(reference_sims)
-            print(f"  Sim1/Sim3 consistent: {len(matching_runs)} matching runs, "
-                  f"each with {n_sims} sim_*** directories ({sorted(reference_sims)[0]} … {sorted(reference_sims)[-1]})")
+    # --- Informational: runs in Sim3 not selected ---
+    inactive_in_sim3 = set(sim3_run_to_sims.keys()) - active_run_ids
+    if inactive_in_sim3:
+        print(f"  INFO: Folgende Sim3-Runs sind vorhanden aber nicht aktiv: "
+              f"{sorted(inactive_in_sim3)}")
+
+    n_sims = len(reference_sims)
+    sim_range = f"{sorted(reference_sims)[0]} … {sorted(reference_sims)[-1]}"
+    print(f"  OK: {len(active_run_ids)} aktive Run(s), je {n_sims} sim_***-Verzeichnisse ({sim_range})")
 
 
 # ============================================================================
@@ -1598,6 +1627,14 @@ Beispiel:
                         help='Ausführliche Ausgabe')
     parser.add_argument('--muons-per-run', type=int, required=True,
                         help='Anzahl simulierter Myonen pro Run (für primaries-Dataset im Output)')
+    parser.add_argument('--sim3-runs', type=int, nargs='+', default=None,
+                        metavar='RUN_ID',
+                        help='Welche Run-IDs aus Sim3 verarbeitet werden sollen (z.B. --sim3-runs 1 '
+                             'oder --sim3-runs 1 2 3). Nur diese Runs werden in den Output '
+                             'geschrieben; alle anderen werden übersprungen. Fehlt diese Option, '
+                             'werden alle in Sim3 vorhandenen Runs verwendet. Alle angegebenen '
+                             'Runs müssen dieselbe Anzahl an sim_***-Verzeichnissen besitzen, '
+                             'sonst wird abgebrochen.')
 
     return parser.parse_args()
 
@@ -1634,8 +1671,22 @@ def main():
 
     print("\n=== Validiere Sim3-Struktur (run_NNN/sim_NNN/) ===")
     sim3_summary = validate_sim3_structure(args.input_sim3)
-    print("=== Prüfe Konsistenz Sim1 ↔ Sim3 ===")
-    validate_sim1_sim3_consistency(args.input_sim1, args.input_sim3)
+
+    # Resolve which runs to process
+    all_sim3_run_ids = set(sim3_summary.keys())
+    if args.sim3_runs is not None:
+        active_run_ids = set(args.sim3_runs)
+        print(f"\n--sim3-runs angegeben: verarbeite nur Run(s) {sorted(active_run_ids)}")
+    else:
+        active_run_ids = all_sim3_run_ids
+        print(f"\nKein --sim3-runs angegeben: verarbeite alle {len(active_run_ids)} Sim3-Run(s)")
+
+    print("=== Prüfe Konsistenz Sim1 ↔ Sim3 (nur aktive Runs) ===")
+    try:
+        validate_sim1_sim3_consistency(args.input_sim1, args.input_sim3, active_run_ids)
+    except RuntimeError as e:
+        print(str(e))
+        sys.exit(1)
 
     # === Geometrie ===
     geometry_result = defineZylinder(args.geometry, args.valid_detectors)
@@ -1657,27 +1708,63 @@ def main():
     print(f"Voxel-Tree mit {len(voxel_data)} Voxeln erstellt")
 
     # === Files finden ===
-    sim1_files = find_all_hdf5_files(args.input_sim1, args.nested)
-    if not sim1_files:
+    sim1_files_all = find_all_hdf5_files(args.input_sim1, args.nested)
+    if not sim1_files_all:
         print("Fehler: Keine output_*.hdf5 Dateien in Sim1-Pfad gefunden!")
         sys.exit(1)
-    print(f"Sim1: {len(sim1_files)} Dateien gefunden")
 
-    sim2_files_by_run = find_sim2_files(args.input_sim2, args.nested)
-    total_sim2_files = sum(len(v) for v in sim2_files_by_run.values())
-    if total_sim2_files == 0:
+    sim2_files_by_run_all = find_sim2_files(args.input_sim2, args.nested)
+    if not sim2_files_by_run_all:
         print("Fehler: Keine output_t*.hdf5 Dateien in Sim2-Pfad gefunden!")
         sys.exit(1)
-    print(f"Sim2: {total_sim2_files} Dateien in {len(sim2_files_by_run)} Runs")
 
     print("\nSuche Sim3-Files...")
-    sim3_files_by_run = find_sim3_files(args.input_sim3)
-    total_sim3_files = sum(len(v) for v in sim3_files_by_run.values())
-    if total_sim3_files == 0:
+    sim3_files_by_run_all = find_sim3_files(args.input_sim3)
+    if not sim3_files_by_run_all:
         print("Fehler: Keine HDF5-Dateien in Sim3-Pfad gefunden!")
         sys.exit(1)
-    total_sim3_sims = sum(len(sims) for sims in sim3_summary.values())
-    print(f"Sim3: {total_sim3_files} Dateien in {total_sim3_sims} sim_***-Verzeichnissen über {len(sim3_files_by_run)} Runs")
+
+    # === Auf aktive Runs filtern ===
+    if args.nested:
+        sim1_files = [f for f in sim1_files_all
+                      if _extract_run_id_from_path(f) in active_run_ids]
+        skipped_sim1 = [f for f in sim1_files_all
+                        if _extract_run_id_from_path(f) not in active_run_ids]
+    else:
+        sim1_files = sim1_files_all
+        skipped_sim1 = []
+
+    sim2_files_by_run = {rid: files for rid, files in sim2_files_by_run_all.items()
+                         if rid in active_run_ids}
+    sim3_files_by_run = {rid: files for rid, files in sim3_files_by_run_all.items()
+                         if rid in active_run_ids}
+
+    # === Run-Selektion zusammenfassen ===
+    all_known_run_ids = (
+        {_extract_run_id_from_path(f) for f in sim1_files_all}
+        | set(sim2_files_by_run_all.keys())
+        | set(sim3_files_by_run_all.keys())
+    ) if args.nested else active_run_ids
+
+    skipped_run_ids = all_known_run_ids - active_run_ids
+
+    print(f"\n{'='*60}")
+    print(f"RUN-SELEKTION")
+    print(f"{'='*60}")
+    print(f"  Aktive Runs   : {sorted(active_run_ids)}")
+    if skipped_run_ids:
+        print(f"  Übersprungene : {sorted(skipped_run_ids)}  ← nicht in --sim3-runs, werden NICHT in Output geschrieben")
+    else:
+        print(f"  Übersprungene : keine")
+    print(f"{'='*60}")
+
+    total_sim3_sims = sum(len(sims) for run_id, sims in sim3_summary.items()
+                          if run_id in active_run_ids)
+    total_sim2_files = sum(len(v) for v in sim2_files_by_run.values())
+    total_sim3_files = sum(len(v) for v in sim3_files_by_run.values())
+    print(f"Sim1: {len(sim1_files)} Dateien (aktive Runs)")
+    print(f"Sim2: {total_sim2_files} Dateien in {len(sim2_files_by_run)} aktiven Runs")
+    print(f"Sim3: {total_sim3_files} Dateien in {total_sim3_sims} sim_***-Verzeichnissen über {len(sim3_files_by_run)} aktive Runs")
 
     # === Sim2 + Sim3 Files kombinieren ===
     combined_files_by_run = combine_optical_files(sim2_files_by_run, sim3_files_by_run)
