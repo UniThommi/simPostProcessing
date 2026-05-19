@@ -513,6 +513,76 @@ def find_all_hdf5_files(input_path, nested):
     
     return files
 
+
+def check_hdf5_integrity(files_by_run: dict, output_dir: str) -> bool:
+    """
+    Opens and immediately closes every HDF5 file to detect truncated or corrupt
+    files before the expensive processing phase begins.
+
+    Files are grouped by their parent directory — one directory = one simulation.
+    If any file in a directory fails to open, that entire simulation is flagged.
+    The check always runs to completion so the report is exhaustive.
+
+    Returns True if all files are intact, False if any simulation is faulty.
+    Writes a text file listing faulty simulations to output_dir.
+    """
+    print(f"\n=== HDF5-Integritätsprüfung ===")
+
+    files_by_sim: dict = defaultdict(list)
+    for file_list in files_by_run.values():
+        for fpath in file_list:
+            sim_dir = str(Path(fpath).parent)
+            files_by_sim[sim_dir].append(fpath)
+
+    total_sims = len(files_by_sim)
+    total_files = sum(len(v) for v in files_by_sim.values())
+    print(f"  {total_files} Dateien in {total_sims} Simulationsverzeichnissen werden geprüft...")
+
+    faulty: list = []  # list of (sim_dir, first_faulty_file, error_msg)
+
+    for sim_idx, sim_dir in enumerate(sorted(files_by_sim.keys()), 1):
+        dir_files = files_by_sim[sim_dir]
+
+        first_bad_file = None
+        first_error = None
+        for fpath in dir_files:
+            try:
+                with h5py.File(fpath, 'r'):
+                    pass
+            except Exception as e:
+                first_bad_file = fpath
+                first_error = str(e)
+                break
+
+        if first_bad_file is not None:
+            faulty.append((sim_dir, first_bad_file, first_error))
+            print(f"  [{sim_idx}/{total_sims}] FEHLERHAFT: {sim_dir}")
+            print(f"    Datei: {os.path.basename(first_bad_file)}")
+            print(f"    Fehler: {first_error}")
+        elif sim_idx % 10 == 0 or sim_idx == total_sims:
+            print(f"  [{sim_idx}/{total_sims}] OK bis hier...")
+
+    if not faulty:
+        print(f"  Alle {total_sims} Simulationen OK ({total_files} Dateien geprüft).")
+        return True
+
+    report_path = os.path.join(output_dir, "faulty_simulations.txt")
+    with open(report_path, 'w') as rf:
+        rf.write(f"Fehlerhafte Simulationen: {len(faulty)} von {total_sims}\n")
+        rf.write(f"Erstellt: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        rf.write(f"Geprüfte Dateien gesamt: {total_files}\n\n")
+        for sim_dir, bad_file, err_msg in faulty:
+            rf.write(f"Verzeichnis : {sim_dir}\n")
+            rf.write(f"  Datei     : {bad_file}\n")
+            rf.write(f"  Fehler    : {err_msg}\n\n")
+
+    print(f"\n  {len(faulty)} fehlerhafte Simulation(en) gefunden:")
+    for sim_dir, bad_file, _ in faulty:
+        print(f"    - {sim_dir}  (erste fehlerhafte Datei: {os.path.basename(bad_file)})")
+    print(f"\n  Vollständige Fehlerliste: {report_path}")
+    return False
+
+
 # ============================================================================
 # Geometry & Voxel Functions (identisch zum Single-Sim Script)
 # ============================================================================
@@ -1627,6 +1697,11 @@ def main():
         print(f"Fehler: Keine output_*.hdf5 Dateien gefunden!")
         sys.exit(1)
     print(f"Gefunden: {len(files)} Dateien insgesamt")
+
+    # === HDF5-Integritätsprüfung aller Eingabe-Files ===
+    if not check_hdf5_integrity({0: files}, args.output):
+        print("\nAbbruch: fehlerhafte HDF5-Dateien gefunden. Fehlerliste siehe faulty_simulations.txt.")
+        sys.exit(1)
 
     # Run-ID-Mapping aufbauen (file_path → run_id)
     file_run_id_map = build_file_run_id_map(files, args.nested)
