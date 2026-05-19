@@ -1028,7 +1028,7 @@ def scan_sim2_and_aggregate(
 
                         relative_times = np.where(has_nc, photon_times - nc_times_arr, np.inf)
 
-                        negative_mask = has_nc & (relative_times < 0)
+                        negative_mask = has_nc & (relative_times < -1.0)
                         if np.any(negative_mask):
                             neg_indices = np.where(negative_mask)[0]
                             first_bad = neg_indices[0]
@@ -1041,6 +1041,11 @@ def scan_sim2_and_aggregate(
                                 f"  relative_time={float(relative_times[first_bad]):.4f} ns\n"
                                 f"  {int(np.sum(negative_mask))} Photonen mit negativer relativer Zeit."
                             )
+
+                        # Clamp rounding artifacts in [-1 ns, 0) to 0
+                        rounding_mask = has_nc & (relative_times < 0.0)
+                        if np.any(rounding_mask):
+                            relative_times[rounding_mask] = 0.0
 
                         time_mask = has_nc & (relative_times >= 0) & (relative_times <= 200.0)
                         x, y, z = x[time_mask], y[time_mask], z[time_mask]
