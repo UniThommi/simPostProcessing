@@ -132,6 +132,9 @@ logger = logging.getLogger("nc_consistency")
 #: run directory naming convention, e.g. "run_007" -> 7
 _RUN_DIR_RE = re.compile(r"^run_(\d+)$")
 
+#: sim sub-directory naming convention (multi-run layout), e.g. "sim_007" -> 7
+_SIM_DIR_RE = re.compile(r"^sim_(\d+)$")
+
 #: HDF5 file globs tried (in order) inside a run / flat directory.
 _FILE_PATTERNS: Tuple[str, ...] = ("output_t*.hdf5", "output_*.hdf5")
 
@@ -273,11 +276,41 @@ def _glob_first(directory: Path, patterns: Sequence[str]) -> List[Path]:
     return []
 
 
-def discover_run_files(base: str, label: str) -> Dict[int, List[Path]]:
+def _pick_sim_subdir_files(run_dir: Path, label: str, run_id: int) -> List[Path]:
+    """Pick one sim sub-directory inside a run dir and return its HDF5 files.
+
+    In the multi-run layout, ``run_NNN`` contains several ``sim_MMM`` sub-dirs
+    that all share the same underlying NC truth. The first sorted ``sim_MMM``
+    that actually contains HDF5 files is chosen (the choice does not matter for
+    NC identity, only that we read a complete, self-consistent NC set).
+
+    Returns an empty list if no sim sub-directory with HDF5 files is found.
+    """
+    sim_dirs = sorted(
+        (d for d in run_dir.iterdir() if d.is_dir() and _SIM_DIR_RE.match(d.name)),
+        key=lambda d: int(_SIM_DIR_RE.match(d.name).group(1)),  # type: ignore[union-attr]
+    )
+    if not sim_dirs:
+        # Be lenient: fall back to any sub-directory holding HDF5 files.
+        sim_dirs = sorted(d for d in run_dir.iterdir() if d.is_dir())
+    for sd in sim_dirs:
+        files = _glob_first(sd, _FILE_PATTERNS)
+        if files:
+            logger.info(
+                "[%s] run_%03d: selected sim dir '%s' (%d file(s)) [multi-run].",
+                label, run_id, sd.name, len(files),
+            )
+            return files
+    return []
+
+
+def discover_run_files(base: str, label: str, multi_run: bool = False) -> Dict[int, List[Path]]:
     """Discover simulation HDF5 files, auto-detecting nested vs flat layout.
 
-    Nested layout: ``base/run_NNN/output_*.hdf5`` -> keyed by integer run id.
-    Flat layout:   ``base/output_*.hdf5``         -> keyed by run id ``0``.
+    Nested layout:     ``base/run_NNN/output_*.hdf5``           -> keyed by run id.
+    Flat layout:       ``base/output_*.hdf5``                   -> keyed by run id 0.
+    Multi-run layout:  ``base/run_NNN/sim_MMM/output_*.hdf5``   -> one sim_MMM is
+                       chosen per run (only when ``multi_run`` is True).
 
     Parameters
     ----------
@@ -285,6 +318,9 @@ def discover_run_files(base: str, label: str) -> Dict[int, List[Path]]:
         Directory to scan.
     label:
         Dataset label for log/error messages.
+    multi_run:
+        If True, each ``run_NNN`` is expected to contain ``sim_MMM`` sub-dirs;
+        one is chosen per run.
 
     Returns
     -------
@@ -312,7 +348,27 @@ def discover_run_files(base: str, label: str) -> Dict[int, List[Path]]:
 
     files_by_run: Dict[int, List[Path]] = {}
 
-    if run_dirs:
+    if multi_run:
+        if not run_dirs:
+            raise RuntimeError(
+                f"[{label}] --multi-run set but no run_NNN directories found in "
+                f"{base_path}."
+            )
+        for run_id, run_dir in run_dirs:
+            files = _pick_sim_subdir_files(run_dir, label, run_id)
+            if files:
+                files_by_run[run_id] = files
+        if not files_by_run:
+            raise RuntimeError(
+                f"[{label}] --multi-run set but no run_NNN/sim_MMM directory in "
+                f"{base_path} contained any of {list(_FILE_PATTERNS)}."
+            )
+        n_files = sum(len(v) for v in files_by_run.values())
+        logger.info(
+            "[%s] Multi-run layout: %d run(s), %d file(s) total (one sim dir/run).",
+            label, len(files_by_run), n_files,
+        )
+    elif run_dirs:
         for run_id, run_dir in run_dirs:
             files = _glob_first(run_dir, _FILE_PATTERNS)
             if files:
@@ -441,12 +497,20 @@ def load_sim1(path: str, label: str = "sim1") -> NCDataset:
     return ds
 
 
-def load_raw_sim(path: str, label: str, allow_optical_fallback: bool = True) -> NCDataset:
+def load_raw_sim(
+    path: str,
+    label: str,
+    allow_optical_fallback: bool = True,
+    multi_run: bool = False,
+) -> NCDataset:
     """Load NC ids from a raw optical sim (SSD or PMT).
 
     Prefers /hit/DebugVertices (one row per gamma -> deduped to all NCs). If
     absent and ``allow_optical_fallback`` is set, falls back to the NC ids
     referenced by /hit/optical (a SUBSET) and marks the dataset ``is_full=False``.
+
+    When ``multi_run`` is True, the ``run_NNN/sim_MMM/output_*.hdf5`` layout is
+    used and one ``sim_MMM`` is chosen per run.
 
     Raises
     ------
@@ -454,7 +518,7 @@ def load_raw_sim(path: str, label: str, allow_optical_fallback: bool = True) -> 
         On I/O / schema errors, or if a file mixes sources, or if neither
         DebugVertices nor optical is available.
     """
-    files_by_run = discover_run_files(path, label)
+    files_by_run = discover_run_files(path, label, multi_run=multi_run)
     chunks: List[np.ndarray] = []
     per_run: Dict[int, int] = {}
     source: Optional[str] = None
@@ -738,6 +802,7 @@ def run_validation(
     postprocessed_path: str,
     pmt_path: Optional[str],
     allow_optical_fallback: bool = True,
+    multi_run_ssd: bool = False,
 ) -> None:
     """Load every data format and run all consistency stages.
 
@@ -754,7 +819,9 @@ def run_validation(
     logger.info(">>> Loading sim1 NC truth ...")
     sim1 = load_sim1(sim1_path)
     logger.info(">>> Loading raw SSD NC ids ...")
-    raw_ssd = load_raw_sim(raw_ssd_path, "raw SSD", allow_optical_fallback)
+    raw_ssd = load_raw_sim(
+        raw_ssd_path, "raw SSD", allow_optical_fallback, multi_run=multi_run_ssd
+    )
     logger.info(">>> Loading post-processed SSD NC ids ...")
     post = load_postprocessed(postprocessed_path)
     pmt: Optional[NCDataset] = None
@@ -817,6 +884,9 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--pmt", default=None,
                         help="Raw PMT sim2 directory (nested run_NNN; /hit/DebugVertices). "
                              "Optional; omit to skip Step 3.")
+    parser.add_argument("--multi-run", action="store_true",
+                        help="Raw SSD uses the run_NNN/sim_MMM/output_*.hdf5 layout; "
+                             "one sim_MMM is chosen per run. (Applies to --raw-ssd only.)")
     parser.add_argument("--no-optical-fallback", action="store_true",
                         help="Disallow falling back to /hit/optical when "
                              "/hit/DebugVertices is missing (fail instead).")
@@ -842,6 +912,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             postprocessed_path=args.postprocessed_ssd,
             pmt_path=args.pmt,
             allow_optical_fallback=not args.no_optical_fallback,
+            multi_run_ssd=args.multi_run,
         )
     except RuntimeError as exc:
         logger.error("\n%s", exc)
