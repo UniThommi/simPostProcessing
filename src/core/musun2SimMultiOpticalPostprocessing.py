@@ -1,27 +1,28 @@
 #!/usr/bin/env python3
 """
-Post-Processing für Drei-Quellen-Workflow (Multi-Optik):
-  Simulation 1: Muon → Neutron Capture (NC) Daten (MyNeutronCaptureOutput), KEINE optischen Photonen
-  Simulation 2: Gamma-Vertices aus NCs → Optische Photonen (eine Simulation pro Run, -i2)
-  Simulation 3+: Mehrfache optische Simulationen derselben NC-Events (-i3),
-                Struktur: run_NNN/sim_NNN/output_t*.hdf5
+Post-processing for the MUSUN workflow with repeated optical simulations.
 
-Workflow:
-  1. NC-Daten aus allen Sim1-Files laden (Position, Gamma-Info, Material, Volume)
-  2. Globale Material/Volume-Mappings erstellen oder laden
-  3. Alle optischen Files (Sim2 + alle Sim3 sim_***-Unterordner) sequenziell scannen:
-     Photonen filtern und per (run_id, muon_id, nC_id) aggregieren.
-     Optische Hits werden über ALLE Simulationen (Sim2 + jede Sim3 sim_***) aufsummiert.
-  4. NC-Daten mit aggregierten Voxel-Hits zusammenführen
-  5. HDF5-Output schreiben (identisches Format wie musun2SimFullPostprocessing.py)
+Same processing and output format as musun2SimFullPostprocessing.py, but the
+photon hits of several optical simulations of the same neutron captures (NCs)
+are summed:
+  -i1  sim1: NC truth of the MUSUN muon simulation    run_NNN/
+  -i2  sim2: first optical simulation of the NCs      run_NNN/
+  -i3  further optical simulations of the same NCs    run_NNN/sim_NNN/
 
-Zuordnung Sim1 ↔ Sim2/Sim3:
-  - optical/muon_track_id  ==  MyNeutronCaptureOutput/evtid
-  - optical/nC_track_id    ==  MyNeutronCaptureOutput/nC_track_id
+Why several simulations: an SSD voxel combines the optical properties of a PMT
+with those of the reflective foil that lines the rest of the wall. It therefore
+reflects much more light than a PMT, and a single optical simulation yields a
+lower detection efficiency per voxel than a PMT would have. Summing the hits of
+several simulations of the same NCs raises the voxel efficiency to that of a PMT.
 
-Zeitfilter:
-  relative_time = photon_time - nC_time (aus Sim1)
-  Muss >= 0 sein; Fenster: 0 <= relative_time <= 200 ns
+All optical files of a run (sim2 plus every sim_NNN of -i3) are scanned in turn
+and their hits are accumulated in the same per-NC counters. --sim3-runs
+restricts the processing to selected runs; all processed runs must contain the
+same set of sim_NNN directories.
+
+Matching, time window (0-200 ns, 1 ns tolerance for rounding), resuming and the
+output files are the same as in musun2SimFullPostprocessing.py; see its module
+docstring for details.
 
 Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
@@ -50,6 +51,7 @@ import shutil
 # ============================================================================
 
 def get_memory_usage():
+    """Return the memory usage of the current process (RSS/VMS in MB, percent of total)."""
     process = psutil.Process(os.getpid())
     memory_info = process.memory_info()
     return {
@@ -69,23 +71,36 @@ def print_memory_usage(label=""):
 # ============================================================================
 
 class ProgressTracker:
+    """Persists the processing state in the output directory so that a run can be resumed.
+
+    processing_progress.json stores the run settings ('config'), whether the
+    optical scan has finished ('sim2_scan_complete') and the number of
+    completely written output rows ('rows_committed'); scan_checkpoint.npz
+    stores the scan result. Both are removed after a successful run.
+
+    The class is shared with zylFullPostprocessingOptimized.py; the methods for
+    per-file progress and the train/validation split are not used here.
+    """
+
     def __init__(self, output_dir, output_file):
         self.output_dir = Path(output_dir)
         self.output_file = Path(output_file)
         self.progress_file = self.output_dir / "processing_progress.json"
         self.lock_file = self.output_dir / "processing.lock"
         self.split_file = self.output_dir / "train_val_split.json"
+        self.scan_checkpoint_file = self.output_dir / "scan_checkpoint.npz"
         self.progress_data = self.load_progress()
 
     def load_progress(self):
+        """Load the saved progress, or return a fresh state if there is none."""
         if self.progress_file.exists():
             try:
                 with open(self.progress_file, 'r') as f:
                     data = json.load(f)
-                print(f"Bestehender Fortschritt gefunden: {len(data.get('completed_files', []))} Files bereits verarbeitet")
+                print(f"Existing progress found: {len(data.get('completed_files', []))} files already processed")
                 return data
             except (json.JSONDecodeError, IOError) as e:
-                print(f"Warnung: Konnte Fortschritt nicht laden ({e}), starte neu")
+                print(f"Warning: could not load progress ({e}), starting from scratch")
 
         return {
             'completed_files': [],
@@ -96,49 +111,20 @@ class ProgressTracker:
             'total_unassigned': 0,
             'output_file': str(self.output_file),
             'sim2_scan_complete': False,
+            'rows_committed': 0,
+            'config': None,
         }
 
-    def save_train_val_split(self, train_triplets, val_triplets, random_seed, val_fraction):
-        split_data = {
-            'random_seed': random_seed,
-            'val_fraction': val_fraction,
-            'train_triplets': [[int(t[0]), int(t[1]), int(t[2])] for t in train_triplets],
-            'val_triplets': [[int(t[0]), int(t[1]), int(t[2])] for t in val_triplets],
-            'created_at': time.time()
-        }
-        try:
-            with open(self.split_file, 'w') as f:
-                json.dump(split_data, f, indent=2)
-            print(f"Train/Val Split gespeichert in {self.split_file}")
-        except IOError as e:
-            print(f"Warnung: Konnte Split nicht speichern: {e}")
-
-    def load_train_val_split(self):
-        if not self.split_file.exists():
-            return None
-        try:
-            with open(self.split_file, 'r') as f:
-                split_data = json.load(f)
-            train_triplets = set(tuple(t) for t in split_data['train_triplets'])
-            val_triplets = set(tuple(t) for t in split_data['val_triplets'])
-            print(f"Train/Val Split geladen:")
-            print(f"  Training: {len(train_triplets)} NC-Events")
-            print(f"  Validation: {len(val_triplets)} NC-Events")
-            print(f"  Random Seed: {split_data['random_seed']}")
-            print(f"  Val Fraction: {split_data['val_fraction']}")
-            return (train_triplets, val_triplets,
-                    split_data['random_seed'],
-                    split_data['val_fraction'])
-        except (json.JSONDecodeError, IOError, KeyError) as e:
-            print(f"Warnung: Konnte Split nicht laden ({e}), erstelle neuen")
-            return None
 
     def cleanup(self):
+        """Remove the progress, lock and scan checkpoint files (after success or --reset)."""
         try:
             if self.progress_file.exists():
                 self.progress_file.unlink()
             if self.lock_file.exists():
                 self.lock_file.unlink()
+            if self.scan_checkpoint_file.exists():
+                self.scan_checkpoint_file.unlink()
         except OSError:
             pass
 
@@ -148,73 +134,22 @@ class ProgressTracker:
             with open(self.progress_file, 'w') as f:
                 json.dump(self.progress_data, f, indent=2)
         except IOError as e:
-            print(f"Warnung: Konnte Fortschritt nicht speichern: {e}")
-
-    def log_processing_params(self, chunk_size, available_mem_gb):
-        if 'processing_params' not in self.progress_data:
-            self.progress_data['processing_params'] = []
-        self.progress_data['processing_params'].append({
-            'timestamp': time.time(),
-            'chunk_size': chunk_size,
-            'available_mem_gb': round(available_mem_gb, 2)
-        })
-        self.save_progress()
-
-    def is_file_completed(self, file_path):
-        return str(file_path) in self.progress_data['completed_files']
-
-    def mark_file_completed(self, file_path, entries_count, unassigned_count):
-        file_str = str(file_path)
-        if file_str not in self.progress_data['completed_files']:
-            self.progress_data['completed_files'].append(file_str)
-            self.progress_data['total_entries_written'] += entries_count
-            self.progress_data['total_unassigned'] += unassigned_count
-            self.save_progress()
-
-    def create_checkpoint(self, output_file):
-        checkpoint_file = str(output_file).replace('.hdf5', '_checkpoint.hdf5')
-        checkpoint_old = str(output_file).replace('.hdf5', '_checkpoint_old.hdf5')
-        try:
-            if os.path.exists(checkpoint_file):
-                shutil.move(checkpoint_file, checkpoint_old)
-            shutil.copy2(output_file, checkpoint_file)
-            print(f"  Checkpoint erstellt: {os.path.basename(checkpoint_file)}")
-        except Exception as e:
-            print(f"  Warnung: Konnte Checkpoint nicht erstellen: {e}")
+            print(f"Warning: could not save progress: {e}")
 
     def verify_hdf5_integrity(self, output_file):
+        """Return True if the output file can be opened and contains the main datasets."""
         try:
             with h5py.File(output_file, 'r') as f:
                 if 'phi_matrix' in f and 'target_matrix' in f and 'event_ids' in f:
                     _ = f['phi_matrix'].shape
                     return True
         except Exception as e:
-            print(f"  WARNUNG: HDF5-Integritätsprüfung fehlgeschlagen: {e}")
+            print(f"  WARNING: HDF5 integrity check failed: {e}")
             return False
         return False
 
-    def mark_file_failed(self, file_path, error_msg):
-        self.progress_data['failed_files'].append({
-            'file': str(file_path),
-            'error': str(error_msg),
-            'timestamp': time.time()
-        })
-        self.save_progress()
-
-    def get_remaining_files(self, all_files):
-        completed = set(self.progress_data['completed_files'])
-        return [f for f in all_files if str(f) not in completed]
-
-    def get_statistics(self):
-        return {
-            'completed': len(self.progress_data['completed_files']),
-            'failed': len(self.progress_data['failed_files']),
-            'total_entries': self.progress_data['total_entries_written'],
-            'total_unassigned': self.progress_data['total_unassigned'],
-            'elapsed_time': time.time() - self.progress_data['start_time']
-        }
-
     def mark_sim2_scan_complete(self):
+        """Record that Phase 2 has finished and its checkpoint has been saved."""
         self.progress_data['sim2_scan_complete'] = True
         self.save_progress()
 
@@ -223,36 +158,144 @@ class ProgressTracker:
 
 
 # ============================================================================
+# Resume support
+# ============================================================================
+
+# Row-aligned output datasets; they always have the same number of rows.
+_ROW_DATASETS = ('phi_matrix', 'target_matrix', 'region_matrix', 'event_ids', 'weights')
+
+
+def save_scan_checkpoint(path, nc_voxel_counters, total_unassigned, total_orphaned, scanned_runs):
+    """Save the aggregated Phase-2 result so that a restart can skip the optical scan.
+
+    The per-NC voxel counters are flattened into CSR-like arrays: the hits of the
+    i-th key are voxel_ids[offsets[i]:offsets[i+1]] with the matching counts.
+    The file is written under a temporary name and then renamed, so an
+    interrupted save never leaves a truncated checkpoint behind.
+    """
+    keys = list(nc_voxel_counters.keys())
+    offsets = np.zeros(len(keys) + 1, dtype=np.int64)
+    voxel_ids, counts = [], []
+    for i, key in enumerate(keys):
+        counter = nc_voxel_counters[key]
+        voxel_ids.extend(counter.keys())
+        counts.extend(counter.values())
+        offsets[i + 1] = len(counts)
+
+    path = Path(path)
+    tmp_path = path.with_name(path.stem + ".tmp.npz")
+    np.savez(
+        tmp_path,
+        keys=np.array(keys, dtype=np.int64).reshape(-1, 3),
+        offsets=offsets,
+        voxel_ids=np.array(voxel_ids, dtype=str),
+        counts=np.array(counts, dtype=np.int64),
+        totals=np.array([total_unassigned, total_orphaned], dtype=np.int64),
+        scanned_runs=np.array(sorted(scanned_runs), dtype=np.int64),
+    )
+    os.replace(tmp_path, path)
+
+
+def load_scan_checkpoint(path):
+    """Inverse of save_scan_checkpoint(); returns the same tuple as scan_optical_and_aggregate()."""
+    with np.load(path, allow_pickle=False) as data:
+        keys = data['keys'].tolist()
+        offsets = data['offsets']
+        voxel_ids = data['voxel_ids'].tolist()
+        counts = data['counts'].tolist()
+        total_unassigned, total_orphaned = (int(x) for x in data['totals'])
+        scanned_runs = {int(r) for r in data['scanned_runs']}
+
+    nc_voxel_counters = {}
+    for i, key in enumerate(keys):
+        start, end = offsets[i], offsets[i + 1]
+        nc_voxel_counters[tuple(key)] = Counter(dict(zip(voxel_ids[start:end], counts[start:end])))
+    return nc_voxel_counters, total_unassigned, total_orphaned, scanned_runs
+
+
+def prepare_output_for_resume(output_file, rows_committed):
+    """Drop rows of an interrupted batch and return the keys that are already written.
+
+    Rows beyond ``rows_committed`` (the row count recorded after the last fully
+    written batch) may belong to a partially written batch and are discarded.
+    If the file holds fewer rows than recorded (e.g. it had to be recreated),
+    only the rows that are actually present are kept.
+
+    Returns:
+        (n_rows, written_keys): number of valid rows and the set of their
+        (run_id, muon_id, nc_id) keys.
+    """
+    with h5py.File(output_file, 'a') as out:
+        n_rows = min([rows_committed] + [out[name].shape[0] for name in _ROW_DATASETS])
+        for name in _ROW_DATASETS:
+            dset = out[name]
+            if dset.shape[0] != n_rows:
+                dset.resize((n_rows,) + dset.shape[1:])
+        written_keys = {tuple(row) for row in out['event_ids'][:n_rows].tolist()}
+    return n_rows, written_keys
+
+
+def mark_output_complete(output_file):
+    """Flag the output file as fully written (checked on the next start)."""
+    with h5py.File(output_file, 'a') as out:
+        out.attrs['processing_complete'] = True
+
+
+def is_output_complete(output_file):
+    try:
+        with h5py.File(output_file, 'r') as f:
+            return bool(f.attrs.get('processing_complete', False))
+    except OSError:
+        return False
+
+
+# ============================================================================
 # Mapping Functions
 # ============================================================================
+# Each simulation file numbers its materials and physical volumes in its own
+# way. The functions below translate these local IDs into the global IDs stored
+# in src/mappings/*.json, so that matID/volID mean the same in every row.
 
 def loadMapping(filePath: str) -> dict:
     with open(filePath, 'r') as f:
         mapping = json.load(f)
     return mapping
 
-
 def remapMaterialIDsToGlobal(
     glob_mapping_json_path: str,
     local_mat_map: dict,
     local_material_ids
 ) -> tuple[np.ndarray, dict]:
+    """Translate file-local material IDs into global IDs.
+
+    Read-only: the global mapping must already contain every material (see
+    collect_all_materials_first() / create_global_material_mapping()).
+
+    Args:
+        glob_mapping_json_path: path of the global {material name: ID} mapping
+        local_mat_map: {local ID: material name} of the current file
+        local_material_ids: local material IDs to translate
+
+    Returns:
+        (global IDs as array, global mapping)
+    """
     if not os.path.exists(glob_mapping_json_path):
         raise RuntimeError(
-            f"Globales Material-Mapping fehlt: {glob_mapping_json_path}\n"
-            f"Wurde collect_all_materials_first() ausgeführt?"
+            f"Global material mapping is missing: {glob_mapping_json_path}\n"
+            f"Was collect_all_materials_first() run?"
         )
     globMaterialMapping = loadMapping(glob_mapping_json_path)
     local_material_ids = np.array(local_material_ids)
     unique_local_ids = np.unique(local_material_ids)
     mapping_dict = {}
 
+    # Only map, never extend the global mapping here.
     for local_id in unique_local_ids:
         local_name = local_mat_map[local_id]
         if local_name not in globMaterialMapping:
             raise RuntimeError(
-                f"Material '{local_name}' nicht im globalen Mapping gefunden!\n"
-                f"Verfügbare Materialien: {list(globMaterialMapping.keys())}"
+                f"Material '{local_name}' not found in the global mapping!\n"
+                f"Available materials: {list(globMaterialMapping.keys())}"
             )
         mapping_dict[local_id] = globMaterialMapping[local_name]
 
@@ -266,10 +309,14 @@ def remapVolumeIDsToGlobal(
     local_vol_map: dict,
     local_volume_ids
 ) -> tuple[np.ndarray, dict]:
+    """Translate file-local physical volume IDs into global IDs.
+
+    Same as remapMaterialIDsToGlobal(); the empty volume name is stored as "noVolume".
+    """
     if not os.path.exists(glob_mapping_json_path):
         raise RuntimeError(
-            f"Globales Volume-Mapping fehlt: {glob_mapping_json_path}\n"
-            f"Wurde collect_all_volumes_first() ausgeführt?"
+            f"Global volume mapping is missing: {glob_mapping_json_path}\n"
+            f"Was collect_all_volumes_first() run?"
         )
     globVolumeMapping = loadMapping(glob_mapping_json_path)
     local_volume_ids = np.array(local_volume_ids)
@@ -281,8 +328,8 @@ def remapVolumeIDsToGlobal(
         local_name_clean = "noVolume" if local_name == "" else local_name
         if local_name_clean not in globVolumeMapping:
             raise RuntimeError(
-                f"Volume '{local_name_clean}' nicht im globalen Mapping gefunden!\n"
-                f"Verfügbare Volumes: {list(globVolumeMapping.keys())}"
+                f"Volume '{local_name_clean}' not found in the global mapping!\n"
+                f"Available volumes: {list(globVolumeMapping.keys())}"
             )
         mapping_dict[local_id] = globVolumeMapping[local_name_clean]
 
@@ -292,6 +339,7 @@ def remapVolumeIDsToGlobal(
 
 
 def create_global_material_mapping(all_materials, existing_mapping_path):
+    """Add unknown materials to the global mapping and save it (existing IDs never change)."""
     if os.path.exists(existing_mapping_path):
         with open(existing_mapping_path, 'r') as f:
             global_mapping = json.load(f)
@@ -308,6 +356,7 @@ def create_global_material_mapping(all_materials, existing_mapping_path):
 
 
 def create_global_volume_mapping(all_volumes, existing_mapping_path):
+    """Add unknown volumes to the global mapping and save it (existing IDs never change)."""
     if os.path.exists(existing_mapping_path):
         with open(existing_mapping_path, 'r') as f:
             global_mapping = json.load(f)
@@ -324,7 +373,8 @@ def create_global_volume_mapping(all_volumes, existing_mapping_path):
 
 
 def collect_all_materials_first(files):
-    print("Sammle alle Materialien aus allen Sim1-Files...")
+    """Collect the material names of all sim1 files before processing, so the global mapping is complete."""
+    print("Collecting materials from all sim1 files...")
     all_materials = set()
     for file_path in files:
         try:
@@ -332,14 +382,15 @@ def collect_all_materials_first(files):
                 mapping_names = [x.decode() for x in f["hit/materials/materialNames"]["pages"][:]]
                 all_materials.update(mapping_names)
         except Exception as e:
-            print(f"Fehler beim Lesen von {file_path}: {e}")
+            print(f"Error reading {file_path}: {e}")
             continue
-    print(f"Gefunden: {len(all_materials)} einzigartige Materialien")
+    print(f"Found: {len(all_materials)} unique materials")
     return all_materials
 
 
 def collect_all_volumes_first(files):
-    print("Sammle alle physikalischen Volumes aus allen Sim1-Files...")
+    """Collect the physical volume names of all sim1 files before processing (empty name -> "noVolume")."""
+    print("Collecting physical volumes from all sim1 files...")
     all_volumes = set()
     for file_path in files:
         try:
@@ -351,9 +402,9 @@ def collect_all_volumes_first(files):
                 ]
                 all_volumes.update(volume_names_clean)
         except Exception as e:
-            print(f"Fehler beim Lesen von {file_path}: {e}")
+            print(f"Error reading {file_path}: {e}")
             continue
-    print(f"Gefunden: {len(all_volumes)} einzigartige physikalische Volumes")
+    print(f"Found: {len(all_volumes)} unique physical volumes")
     if "" in all_volumes:
         print(f"  ⚠ WARNING: Empty string still present after sanitization!")
         all_volumes.remove("")
@@ -370,6 +421,7 @@ _SIM_DIR_PATTERN = re.compile(r'^sim_(\d+)$')
 
 
 def _parse_run_id_from_name(name: str) -> int:
+    """Parse integer run_id from a directory name like 'run_007' → 7 (-1 if it does not match)."""
     m = _RUN_DIR_PATTERN.match(name)
     if m:
         return int(m.group(1))
@@ -377,7 +429,7 @@ def _parse_run_id_from_name(name: str) -> int:
 
 
 def _extract_run_id_from_path(file_path: str) -> int:
-    """Returns the run_id embedded in a path like .../run_003/output_t0.hdf5 → 3."""
+    """Returns the run_id embedded in a path like .../run_003/output_t0.hdf5 → 3 (0 if there is none)."""
     for part in Path(file_path).parts:
         if part.startswith("run_"):
             try:
@@ -388,6 +440,16 @@ def _extract_run_id_from_path(file_path: str) -> int:
 
 
 def validate_run_structure(path: str, nested: bool, label: str):
+    """
+    Validates the input directory structure.
+
+    Nested mode: subdirectories with output_*.hdf5 files that do not match the
+    'run_NNN' pattern are ignored (with a message); at least one run_NNN
+    directory is required. Raises RuntimeError otherwise.
+
+    Non-nested mode: checks that output_*.hdf5 files are present directly
+    in path.
+    """
     p = Path(path)
     if nested:
         dirs_with_files = []
@@ -407,7 +469,7 @@ def validate_run_structure(path: str, nested: bool, label: str):
         dirs_with_files = [s for s in dirs_with_files if _RUN_DIR_PATTERN.match(s.name)]
 
         if ignored:
-            print(f"[{label}] Ignoriere {len(ignored)} Verzeichnis(se) ohne run_NNN-Namen: "
+            print(f"[{label}] Ignoring {len(ignored)} directory(ies) without a run_NNN name: "
                   f"{[s.name for s in ignored]}")
 
         if not dirs_with_files:
@@ -452,7 +514,7 @@ def validate_sim3_structure(sim3_path: str) -> dict[int, list[str]]:
 
         sim_dirs = sorted([d for d in run_dir.iterdir() if d.is_dir() and _SIM_DIR_PATTERN.match(d.name)])
         if not sim_dirs:
-            print(f"  [Sim3] WARNING: run_{run_id:03d} has no sim_NNN subdirectories — skipped")
+            print(f"  [Sim3] WARNING: run_{run_id:03d} has no sim_NNN subdirectories - skipped")
             continue
 
         sim_names_with_files = []
@@ -464,7 +526,7 @@ def validate_sim3_structure(sim3_path: str) -> dict[int, list[str]]:
             if hdf5_files:
                 sim_names_with_files.append(sim_dir.name)
             else:
-                print(f"  [Sim3] WARNING: {run_dir.name}/{sim_dir.name} contains no HDF5 files — skipped")
+                print(f"  [Sim3] WARNING: {run_dir.name}/{sim_dir.name} contains no HDF5 files - skipped")
 
         if sim_names_with_files:
             summary[run_id] = sim_names_with_files
@@ -482,6 +544,10 @@ def validate_sim3_structure(sim3_path: str) -> dict[int, list[str]]:
 
 
 def validate_sim1_sim2_consistency(sim1_path: str, sim2_path: str):
+    """
+    Cross-checks that sim1 and sim2 have matching run directories.
+    Warns about runs present in one but not the other.
+    """
     def _get_run_names(path):
         return {
             d.name for d in Path(path).iterdir()
@@ -541,15 +607,15 @@ def validate_sim1_sim3_consistency(sim1_path: str, sim3_path: str,
     for run_id in sorted(active_run_ids):
         run_name = f"run_{run_id:03d}"
         if run_id not in sim1_run_ids:
-            errors.append(f"  FEHLER: {run_name} ist aktiv, aber fehlt in Sim1 ({sim1_path})")
+            errors.append(f"  ERROR: {run_name} is active but missing in Sim1 ({sim1_path})")
         if run_id not in sim3_run_to_sims:
-            errors.append(f"  FEHLER: {run_name} ist aktiv, aber fehlt in Sim3 ({sim3_path})")
+            errors.append(f"  ERROR: {run_name} is active but missing in Sim3 ({sim3_path})")
         elif not sim3_run_to_sims[run_id]:
-            errors.append(f"  FEHLER: {run_name}/sim_*** in Sim3 enthält keine sim_NNN-Verzeichnisse")
+            errors.append(f"  ERROR: {run_name}/sim_*** in Sim3 contains no sim_NNN directories")
 
     if errors:
         raise RuntimeError(
-            "Konsistenzprüfung Sim1 ↔ Sim3 fehlgeschlagen:\n" + "\n".join(errors)
+            "Consistency check Sim1 ↔ Sim3 failed:\n" + "\n".join(errors)
         )
 
     # --- Hard check: all active runs must have the same sim_NNN set ---
@@ -566,31 +632,31 @@ def validate_sim1_sim3_consistency(sim1_path: str, sim3_path: str,
 
     if inconsistent:
         lines = [
-            f"  FEHLER: sim_NNN-Sets der aktiven Runs stimmen nicht überein "
-            f"(Referenz: run_{reference_id:03d} mit {sorted(reference_sims)}):"
+            f"  ERROR: the sim_NNN sets of the active runs differ "
+            f"(reference: run_{reference_id:03d} with {sorted(reference_sims)}):"
         ]
         for run_id, missing, extra in inconsistent:
             if missing:
-                lines.append(f"    run_{run_id:03d}: fehlende sim-Dirs: {sorted(missing)}")
+                lines.append(f"    run_{run_id:03d}: missing sim dirs: {sorted(missing)}")
             if extra:
-                lines.append(f"    run_{run_id:03d}: extra sim-Dirs:    {sorted(extra)}")
-        raise RuntimeError("Konsistenzprüfung Sim1 ↔ Sim3 fehlgeschlagen:\n" + "\n".join(lines))
+                lines.append(f"    run_{run_id:03d}: extra sim dirs:   {sorted(extra)}")
+        raise RuntimeError("Consistency check Sim1 ↔ Sim3 failed:\n" + "\n".join(lines))
 
     # --- Informational: inactive runs in Sim1 ---
     inactive_in_sim1 = sim1_run_ids - active_run_ids
     if inactive_in_sim1:
-        print(f"  INFO: Folgende Sim1-Runs sind NICHT aktiv und werden übersprungen: "
+        print(f"  INFO: the following Sim1 runs are NOT active and are skipped: "
               f"{sorted(inactive_in_sim1)}")
 
     # --- Informational: runs in Sim3 not selected ---
     inactive_in_sim3 = set(sim3_run_to_sims.keys()) - active_run_ids
     if inactive_in_sim3:
-        print(f"  INFO: Folgende Sim3-Runs sind vorhanden aber nicht aktiv: "
+        print(f"  INFO: the following Sim3 runs exist but are not active: "
               f"{sorted(inactive_in_sim3)}")
 
     n_sims = len(reference_sims)
     sim_range = f"{sorted(reference_sims)[0]} … {sorted(reference_sims)[-1]}"
-    print(f"  OK: {len(active_run_ids)} aktive Run(s), je {n_sims} sim_***-Verzeichnisse ({sim_range})")
+    print(f"  OK: {len(active_run_ids)} active run(s), each with {n_sims} sim_*** directories ({sim_range})")
 
 
 # ============================================================================
@@ -598,14 +664,15 @@ def validate_sim1_sim3_consistency(sim1_path: str, sim3_path: str,
 # ============================================================================
 
 def find_all_hdf5_files(input_path: str, nested: bool) -> list[str]:
+    """Return all output_*.hdf5 files directly in input_path, or in its subdirectories if nested."""
     files = []
     if nested:
-        print(f"Suche nach Simulationsdaten in Unterordnern von {input_path}...")
+        print(f"Searching for simulation data in subdirectories of {input_path}...")
         subdirs = [d for d in Path(input_path).iterdir() if d.is_dir()]
         for subdir in subdirs:
             subdir_files = sorted(glob.glob(os.path.join(subdir, 'output_*.hdf5')))
             if subdir_files:
-                print(f"  Gefunden: {len(subdir_files)} Files in {subdir.name}")
+                print(f"  Found: {len(subdir_files)} files in {subdir.name}")
                 files.extend(subdir_files)
     else:
         files = sorted(glob.glob(os.path.join(input_path, 'output_*.hdf5')))
@@ -613,6 +680,13 @@ def find_all_hdf5_files(input_path: str, nested: bool) -> list[str]:
 
 
 def find_sim2_files(sim2_path: str, nested: bool = False) -> dict[int, list[str]]:
+    """
+    Find the sim2 HDF5 files grouped by run_id (output_t*.hdf5, else output_*.hdf5).
+
+    Returns:
+        {run_id: [file_paths...]}  if nested=True
+        {0: [file_paths...]}       if nested=False
+    """
     files_by_run: dict[int, list[str]] = {}
 
     if nested:
@@ -632,7 +706,7 @@ def find_sim2_files(sim2_path: str, nested: bool = False) -> dict[int, list[str]
                     f"HDF5 files but does not match the expected 'run_NNN' pattern."
                 )
             files_by_run[run_id] = run_files
-            print(f"  Sim2 run_{run_id:03d}: {len(run_files)} Files")
+            print(f"  Sim2 run_{run_id:03d}: {len(run_files)} files")
     else:
         files = sorted(glob.glob(os.path.join(sim2_path, 'output_t*.hdf5')))
         if not files:
@@ -651,7 +725,7 @@ def find_sim3_files(sim3_path: str) -> dict[int, list[str]]:
         sim3_path/run_NNN/sim_NNN/output_t*.hdf5
 
     All files from all sim_NNN subdirectories within a run are pooled into
-    a single flat list per run_id.  This allows scan_sim2_and_aggregate() to
+    a single flat list per run_id.  This allows scan_optical_and_aggregate() to
     process them transparently alongside Sim2 files.
 
     Returns:
@@ -679,7 +753,7 @@ def find_sim3_files(sim3_path: str) -> dict[int, list[str]]:
 
         if run_files:
             files_by_run[run_id] = run_files
-            print(f"  Sim3 run_{run_id:03d}: {len(sim_dirs)} sim directories → {len(run_files)} total Files")
+            print(f"  Sim3 run_{run_id:03d}: {len(sim_dirs)} sim directories → {len(run_files)} files in total")
 
     return files_by_run
 
@@ -691,7 +765,7 @@ def combine_optical_files(
     """
     Merges Sim2 and Sim3 file lists per run_id into a single combined dict.
 
-    Files from both sources are concatenated — scan_sim2_and_aggregate()
+    Files from both sources are concatenated — scan_optical_and_aggregate()
     will process them in sequence and accumulate hits into shared counters,
     naturally summing photon statistics across all simulations.
     """
@@ -720,7 +794,7 @@ def check_hdf5_integrity(combined_files_by_run: dict, output_dir: str) -> bool:
     Returns True if all files are intact, False if any simulation is faulty.
     Writes a text file listing faulty simulations to output_dir.
     """
-    print(f"\n=== HDF5-Integritätsprüfung (optische Files) ===")
+    print(f"\n=== HDF5 integrity check (optical files) ===")
 
     # Group files by parent directory (= one simulation unit)
     files_by_sim: dict = defaultdict(list)
@@ -731,7 +805,7 @@ def check_hdf5_integrity(combined_files_by_run: dict, output_dir: str) -> bool:
 
     total_sims = len(files_by_sim)
     total_files = sum(len(v) for v in files_by_sim.values())
-    print(f"  {total_files} Dateien in {total_sims} Simulationsverzeichnissen werden geprüft...")
+    print(f"  Checking {total_files} files in {total_sims} simulation directories...")
 
     faulty: list = []  # list of (sim_dir, first_faulty_file, error_msg)
 
@@ -751,31 +825,31 @@ def check_hdf5_integrity(combined_files_by_run: dict, output_dir: str) -> bool:
 
         if first_bad_file is not None:
             faulty.append((sim_dir, first_bad_file, first_error))
-            print(f"  [{sim_idx}/{total_sims}] FEHLERHAFT: {sim_dir}")
-            print(f"    Datei: {os.path.basename(first_bad_file)}")
-            print(f"    Fehler: {first_error}")
+            print(f"  [{sim_idx}/{total_sims}] FAULTY: {sim_dir}")
+            print(f"    File: {os.path.basename(first_bad_file)}")
+            print(f"    Error: {first_error}")
         elif sim_idx % 10 == 0 or sim_idx == total_sims:
-            print(f"  [{sim_idx}/{total_sims}] OK bis hier...")
+            print(f"  [{sim_idx}/{total_sims}] OK so far...")
 
     if not faulty:
-        print(f"  Alle {total_sims} Simulationen OK ({total_files} Dateien geprüft).")
+        print(f"  All {total_sims} simulations OK ({total_files} files checked).")
         return True
 
     # Write full report to text file
     report_path = os.path.join(output_dir, "faulty_simulations.txt")
     with open(report_path, 'w') as rf:
-        rf.write(f"Fehlerhafte Simulationen: {len(faulty)} von {total_sims}\n")
-        rf.write(f"Erstellt: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-        rf.write(f"Geprüfte Dateien gesamt: {total_files}\n\n")
+        rf.write(f"Faulty simulations: {len(faulty)} of {total_sims}\n")
+        rf.write(f"Created: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        rf.write(f"Files checked: {total_files}\n\n")
         for sim_dir, bad_file, err_msg in faulty:
-            rf.write(f"Verzeichnis : {sim_dir}\n")
-            rf.write(f"  Datei     : {bad_file}\n")
-            rf.write(f"  Fehler    : {err_msg}\n\n")
+            rf.write(f"Directory : {sim_dir}\n")
+            rf.write(f"  File    : {bad_file}\n")
+            rf.write(f"  Error   : {err_msg}\n\n")
 
-    print(f"\n  {len(faulty)} fehlerhafte Simulation(en) gefunden:")
+    print(f"\n  {len(faulty)} faulty simulation(s) found:")
     for sim_dir, bad_file, _ in faulty:
-        print(f"    - {sim_dir}  (erste fehlerhafte Datei: {os.path.basename(bad_file)})")
-    print(f"\n  Vollständige Fehlerliste: {report_path}")
+        print(f"    - {sim_dir}  (first faulty file: {os.path.basename(bad_file)})")
+    print(f"\n  Full list of errors: {report_path}")
     return False
 
 
@@ -787,6 +861,12 @@ def defineZylinder(
     geometry_name: str,
     valid_detectors: Optional[List[int]] = None
 ):
+    """Return the geometry constants of the cylindrical SSD (all lengths in mm).
+
+    Only r_zylinder, h_zylinder and valid_detectors are used by the
+    post-processing; see zylFullPostprocessingOptimized.py for the meaning of
+    the other values.
+    """
     valid_geometry_names = ["currentDist"]
     if geometry_name not in valid_geometry_names:
         print("Invalid geometry name. It must be one of the following:")
@@ -794,6 +874,7 @@ def defineZylinder(
             print(name)
         sys.exit()
 
+    # Detector UIDs of the SSD surfaces
     if valid_detectors is None:
         valid_detectors = [1965, 1966, 1967, 1968]
 
@@ -808,7 +889,7 @@ def defineZylinder(
     h = 8900
 
     if geometry_name == "currentDist":
-        r_zylinder = 4300
+        r_zylinder = 4300  # inner radius of the Tyvek wall
         z_origin = 20
         h_zylinder = h + 20 - z_origin
         print("Set currentDist as geometry.")
@@ -822,21 +903,15 @@ def defineZylinder(
 
 
 def build_voxel_tree(voxels: List[Dict]) -> Optional[KDTree]:
+    """Build a KD-tree on the voxel centers; nearest-center lookup assigns photons to voxels."""
     if not voxels:
         return None
     centers = [voxel['center'] for voxel in voxels]
     return KDTree(centers)
 
 
-def assignToNearestVoxel(tree: Optional[KDTree], voxels: list[dict], point) -> str:
-    if tree is None or len(voxels) == 0:
-        return "-1"
-    dist, idx = tree.query(point)
-    voxel = voxels[idx]
-    return str(voxel['index'])
-
-
 def checkRadialMomentumVectorized(x, y, z, px, py, pz):
+    """Return True for photons whose momentum points radially outwards (towards the wall)."""
     r = np.sqrt(x**2 + y**2)
     valid_r = r > 0
     radial_momentum = np.zeros_like(r)
@@ -845,85 +920,17 @@ def checkRadialMomentumVectorized(x, y, z, px, py, pz):
 
 
 # ============================================================================
-# Train/Val Split
+# Train/Val Split and event weight
 # ============================================================================
 
-def collect_all_nc_triplets(files: list[str]) -> set[tuple]:
-    print("Sammle alle Neutron Capture Events für Train/Val Split...")
-    all_nc_triplets = set()
-    for file_idx, file_path in enumerate(files):
-        try:
-            with h5py.File(file_path, 'r') as f:
-                evtid = f['hit']['MyNeutronCaptureOutput']['evtid']['pages'][:]
-                nC_id = f['hit']['MyNeutronCaptureOutput']['nC_track_id']['pages'][:]
-                triplets = [(file_idx, int(evt), int(nc)) for evt, nc in zip(evtid, nC_id)]
-                all_nc_triplets.update(triplets)
-        except Exception as e:
-            print(f"Fehler beim Lesen von {file_path}: {e}")
-            continue
-    print(f"Gefunden: {len(all_nc_triplets)} einzigartige NC-Events über {len(files)} Files")
-    return all_nc_triplets
-
-
-def create_or_load_train_val_split(progress_tracker, all_nc_triplets,
-                                   val_fraction, random_seed):
-    loaded_split = progress_tracker.load_train_val_split()
-
-    if loaded_split is not None:
-        train_triplets, val_triplets, saved_seed, saved_fraction = loaded_split
-        if saved_seed != random_seed:
-            print(f"⚠ WARNUNG: Gespeicherter Random Seed ({saved_seed}) != aktueller Seed ({random_seed})")
-            print(f"  Verwende gespeicherten Split für Konsistenz!")
-        if abs(saved_fraction - val_fraction) > 0.001:
-            print(f"⚠ WARNUNG: Gespeicherte Val-Fraction ({saved_fraction}) != aktuelle ({val_fraction})")
-            print(f"  Verwende gespeicherten Split für Konsistenz!")
-
-        all_triplets_set = set(all_nc_triplets)
-        missing_train = train_triplets - all_triplets_set
-        missing_val = val_triplets - all_triplets_set
-        if missing_train or missing_val:
-            print(f"⚠ WARNUNG: {len(missing_train) + len(missing_val)} NC-Events aus Split fehlen in Daten!")
-            print(f"  Erstelle neuen Split...")
-            loaded_split = None
-        else:
-            print(f"✓ Verwende gespeicherten Split: {len(val_triplets)} Validation-Events")
-            return val_triplets
-
-    if loaded_split is None:
-        print(f"Erstelle neuen Train/Val Split (Event-Level) mit Seed {random_seed}...")
-        evtid_groups = defaultdict(list)
-        for file_idx, evt, nc in all_nc_triplets:
-            evtid_groups[(file_idx, evt)].append((file_idx, evt, nc))
-
-        event_keys = sorted(evtid_groups.keys())
-        np.random.seed(random_seed)
-        np.random.shuffle(event_keys)
-
-        split_idx = int(len(event_keys) * (1 - val_fraction))
-        train_event_keys = set(event_keys[:split_idx])
-
-        train_triplets = set()
-        val_triplets = set()
-        for evt_key, triplets in evtid_groups.items():
-            if evt_key in train_event_keys:
-                train_triplets.update(triplets)
-            else:
-                val_triplets.update(triplets)
-
-        print(f"Train/Val Split erstellt (Event-Level):")
-        print(f"  Events gesamt: {len(event_keys)}")
-        print(f"  Training: {len(train_event_keys)} Events → {len(train_triplets)} NC-Events")
-        print(f"  Validation: {len(event_keys) - len(train_event_keys)} Events → {len(val_triplets)} NC-Events")
-        actual_val = len(val_triplets) / (len(train_triplets) + len(val_triplets)) * 100
-        print(f"  Tatsächlicher Val-Anteil: {actual_val:.1f}%")
-
-        progress_tracker.save_train_val_split(train_triplets, val_triplets,
-                                              random_seed, val_fraction)
-        return val_triplets
-
-
 def calculate_weight_from_files(files: list[str], sample_size: Optional[int] = None) -> float:
-    print("Berechne Gewichtung...")
+    """Compute the per-event weight 1 / (number of NCs) stored in the 'weights' dataset.
+
+    If sample_size is given, the NC count is extrapolated from the first
+    sample_size sim1 files. The weight is constant and not used by the
+    downstream tools.
+    """
+    print("Computing weight...")
     unique_triplets = set()
     files_to_sample = files[:sample_size] if sample_size else files
 
@@ -935,22 +942,22 @@ def calculate_weight_from_files(files: list[str], sample_size: Optional[int] = N
                 triplets = [(file_idx, int(evt), int(nc)) for evt, nc in zip(evtid, nC_id)]
                 unique_triplets.update(triplets)
         except Exception as e:
-            print(f"Warnung: Konnte {file} für Gewichtung nicht lesen: {e}")
+            print(f"Warning: could not read {file} for the weight calculation: {e}")
             continue
 
     if sample_size and sample_size < len(files):
         scale_factor = len(files) / sample_size
         estimated = len(unique_triplets) * scale_factor
         weight = 1 / estimated if estimated > 0 else 1.0
-        print(f"Geschätztes Gewicht basierend auf {sample_size} Files: {weight:.2e}")
+        print(f"Estimated weight based on {sample_size} files: {weight:.2e}")
     else:
         weight = 1 / len(unique_triplets) if unique_triplets else 1.0
-        print(f"Gewicht basierend auf allen {len(files)} Files: {weight:.2e}")
+        print(f"Weight based on all {len(files)} files: {weight:.2e}")
     return weight
 
 
 # ============================================================================
-# Phase 1: NC-Daten aus Sim1 laden
+# Phase 1: Load the NC data from sim1
 # ============================================================================
 
 def load_all_nc_data_from_sim1(
@@ -960,17 +967,21 @@ def load_all_nc_data_from_sim1(
     nested: bool = False
 ) -> dict[tuple[int, int, int], dict]:
     """
-    Lädt alle NC-Daten aus allen Sim1-Files.
+    Load all NCs from all sim1 files, with material and volume IDs translated to global IDs.
 
     Returns:
         nc_data_dict: {(run_id, muon_id, nC_id): {nc_info...}}
+
+    The keys include run_id so that NCs are unique across runs. If a key occurs
+    twice, only the first occurrence is kept and a warning is printed.
     """
-    print(f"\n=== Phase 1: Lade NC-Daten aus {len(sim1_files)} Sim1-Files ===")
+    print(f"\n=== Phase 1: loading NC data from {len(sim1_files)} sim1 files ===")
     phase1_start = time.time()
     nc_data_dict = {}
     duplicate_count = 0
 
     def _get_run_id(file_path: str) -> int:
+        """Extract the run_id from a path like .../run_003/output_t0.hdf5."""
         parts = Path(file_path).parts
         for part in parts:
             if part.startswith("run_"):
@@ -982,7 +993,7 @@ def load_all_nc_data_from_sim1(
 
     for file_idx, file_path in enumerate(sim1_files):
         run_id = _get_run_id(file_path) if nested else 0
-        print(f"  Lade Sim1-File {file_idx + 1}/{len(sim1_files)}: {os.path.basename(file_path)} (run_id={run_id})")
+        print(f"  Loading sim1 file {file_idx + 1}/{len(sim1_files)}: {os.path.basename(file_path)} (run_id={run_id})")
 
         try:
             with h5py.File(file_path, 'r') as f:
@@ -1000,6 +1011,7 @@ def load_all_nc_data_from_sim1(
                 nc_time = nc_out['nC_time_in_ns']['pages'][:]
                 nc_flag_ge77 = nc_out['nC_flag_Ge77']['pages'][:]
 
+                # Capture gammas 1-4 (energy and momentum direction)
                 gamma_data_nc = {}
                 for i in range(1, 5):
                     gamma_data_nc[f'gamma{i}_px'] = nc_out[f'gamma{i}_px']['pages'][:]
@@ -1050,23 +1062,23 @@ def load_all_nc_data_from_sim1(
                     }
 
         except Exception as e:
-            print(f"  FEHLER beim Laden von {file_path}: {e}")
+            print(f"  ERROR loading {file_path}: {e}")
             raise
 
     if duplicate_count > 0:
-        print(f"  ⚠ WARNUNG: {duplicate_count} Duplikat-(run_id, muon_id, nC_id) Triplets!")
+        print(f"  ⚠ WARNING: {duplicate_count} duplicate (run_id, muon_id, nC_id) triplets!")
 
     phase1_elapsed = time.time() - phase1_start
-    print(f"  ✓ {len(nc_data_dict)} einzigartige NC-Events geladen in {phase1_elapsed/60:.1f} min")
-    print_memory_usage("Nach Phase 1")
+    print(f"  ✓ {len(nc_data_dict)} unique NC events loaded in {phase1_elapsed/60:.1f} min")
+    print_memory_usage("after Phase 1")
     return nc_data_dict
 
-
 # ============================================================================
-# Phase 2: Optische Dateien (Sim2 + alle Sim3) sequenziell scannen
+# Phase 2: Scan all optical files (sim2 + all sim3) and aggregate the voxel hits
 # ============================================================================
 
 def get_chunk_size() -> int:
+    """Number of photons read per chunk, chosen from the available memory."""
     available_mem_gb = psutil.virtual_memory().available / (1024**3)
     if available_mem_gb > 400:
         return 50000
@@ -1090,50 +1102,56 @@ def scan_optical_and_aggregate(
     geometry_params: dict,
 ) -> tuple[dict[tuple[int, int, int], Counter], int, int, set[int]]:
     """
-    Scannt alle optischen Files (Sim2 + alle Sim3 sim_***) run-weise und
-    aggregiert Voxel-Hits pro NC-Event.
+    Scan all optical files (sim2 + every sim3 sim_***) run by run and count the
+    selected photons per NC and voxel.
 
-    Hits aus Sim2 und allen Sim3-Simulationen werden in dieselben Counter
-    akkumuliert — das Ergebnis ist die Summe aller optischen Simulationen.
+    The hits of sim2 and all sim3 simulations are accumulated in the same
+    counters, so the result is the sum over all optical simulations. Photon
+    selection and NC matching are the same as in
+    musun2SimFullPostprocessing.scan_sim2_and_aggregate().
 
     Args:
-        combined_files_by_run: {run_id: [alle optischen HDF5-Dateien für diesen Run]}
-                               (Sim2-Dateien + alle Sim3 sim_***-Dateien zusammengeführt)
+        combined_files_by_run: {run_id: [all optical HDF5 files of this run]}
+                               (sim2 files + all sim3 sim_*** files)
         nc_data_dict: {(run_id, muon_id, nC_id): nc_info}
-        voxel_tree: KDTree der Voxel-Mittelpunkte
-        voxel_data: Voxel-Definitionen
-        geometry_params: Geometrie-Parameter
+        voxel_tree: KD-tree on the voxel centers
+        voxel_data: voxel definitions (same order as the tree)
+        geometry_params: r_zylinder, h_zylinder and valid_detectors
 
     Returns:
-        nc_voxel_counters: {(run_id, muon_id, nC_id): Counter} (aufsummiert)
+        nc_voxel_counters: {(run_id, muon_id, nC_id): Counter} (summed)
         total_unassigned, total_orphaned, successfully_scanned_runs
     """
     total_optical_files = sum(len(v) for v in combined_files_by_run.values())
-    print(f"\n=== Phase 2: Scanne {total_optical_files} optische Files über {len(combined_files_by_run)} Runs ===")
-    print(f"  (Hits aus Sim2 und allen Sim3 sim_***-Verzeichnissen werden summiert)")
+    print(f"\n=== Phase 2: scanning {total_optical_files} optical files in {len(combined_files_by_run)} runs ===")
+    print(f"  (hits of sim2 and all sim3 sim_*** directories are summed)")
 
     h_zylinder = geometry_params['h_zylinder']
     r_zylinder = geometry_params['r_zylinder']
     valid_detectors = geometry_params.get('valid_detectors', [1965, 1966, 1967, 1968])
     valid_detectors_array = np.array(valid_detectors, dtype=np.int32)
 
+    # z-coordinates (mm) that separate bottom, barrel and top of the SSD
     z_cut_bot = -4979
     z_cut_top = z_cut_bot + h_zylinder - 2
 
     nc_voxel_counters: dict[tuple[int, int, int], Counter] = defaultdict(Counter)
+    # Every selected photon is assigned to its nearest voxel, so total_unassigned
+    # stays 0; it is kept for the log output.
     total_unassigned = 0
     total_orphaned = 0
 
     CHUNK_SIZE = get_chunk_size()
-    print(f"  Chunk-Size: {CHUNK_SIZE}")
+    print(f"  Chunk size: {CHUNK_SIZE}")
 
     file_counter = 0
     phase2_start = time.time()
 
     for run_id in sorted(combined_files_by_run.keys()):
         optical_files = combined_files_by_run[run_id]
-        print(f"\n  --- Run {run_id}: {len(optical_files)} optische Files (Sim2 + Sim3 summiert) ---")
+        print(f"\n  --- Run {run_id}: {len(optical_files)} optical files (sim2 + sim3 summed) ---")
 
+        # NC time lookup for this run only (muon/NC IDs are unique only within a run)
         nc_times_for_run: dict[tuple[int, int], float] = {
             (muon_id, nc_id): info['nC_time']
             for (rid, muon_id, nc_id), info in nc_data_dict.items()
@@ -1147,7 +1165,7 @@ def scan_optical_and_aggregate(
 
         for opt_idx, opt_file in enumerate(optical_files):
             file_counter += 1
-            print(f"    Opt-File {opt_idx + 1}/{len(optical_files)} (global {file_counter}/{total_optical_files}): {os.path.basename(opt_file)}")
+            print(f"    Optical file {opt_idx + 1}/{len(optical_files)} (global {file_counter}/{total_optical_files}): {os.path.basename(opt_file)}")
             file_unassigned = 0
             file_orphaned = 0
             file_matched = 0
@@ -1157,7 +1175,7 @@ def scan_optical_and_aggregate(
                     total_photons = len(f['hit']['optical']['x_position_in_m']['pages'])
 
                     if total_photons == 0:
-                        print(f"      Keine optischen Photonen, überspringe.")
+                        print(f"      No optical photons, skipping.")
                         continue
 
                     num_chunks = (total_photons - 1) // CHUNK_SIZE + 1
@@ -1166,6 +1184,7 @@ def scan_optical_and_aggregate(
                         chunk_start = chunk_idx * CHUNK_SIZE
                         chunk_end = min(chunk_start + CHUNK_SIZE, total_photons)
 
+                        # Positions converted from m to mm
                         x = np.array(f['hit']['optical']['x_position_in_m']['pages'][chunk_start:chunk_end], dtype=np.float32) * 1000
                         y = np.array(f['hit']['optical']['y_position_in_m']['pages'][chunk_start:chunk_end], dtype=np.float32) * 1000
                         z = np.array(f['hit']['optical']['z_position_in_m']['pages'][chunk_start:chunk_end], dtype=np.float32) * 1000
@@ -1178,7 +1197,7 @@ def scan_optical_and_aggregate(
                         det_uids = f['hit']['optical']['det_uid']['pages'][chunk_start:chunk_end]
                         photon_times = f['hit']['optical']['time_in_ns']['pages'][chunk_start:chunk_end]
 
-                        # Filter 1: Detektor
+                        # Filter 1 (detector): keep only photons on the SSD surfaces
                         det_mask = np.isin(det_uids, valid_detectors_array)
                         x, y, z = x[det_mask], y[det_mask], z[det_mask]
                         px, py, pz = px[det_mask], py[det_mask], pz[det_mask]
@@ -1189,7 +1208,8 @@ def scan_optical_and_aggregate(
                         if len(x) == 0:
                             continue
 
-                        # Filter 2: Zeitfenster
+                        # Filter 2 (time window): capture time of the NC that produced
+                        # each photon (inf = no matching NC, "orphaned" photon)
                         nc_times_arr = np.full(len(photon_times), np.inf, dtype=np.float64)
                         for idx in range(len(muon_ids)):
                             local_key = (int(muon_ids[idx]), int(nc_ids[idx]))
@@ -1201,18 +1221,19 @@ def scan_optical_and_aggregate(
 
                         relative_times = np.where(has_nc, photon_times - nc_times_arr, np.inf)
 
+                        # More than 1 ns before the capture cannot be a rounding artifact: abort.
                         negative_mask = has_nc & (relative_times < -1.0)
                         if np.any(negative_mask):
                             neg_indices = np.where(negative_mask)[0]
                             first_bad = neg_indices[0]
                             raise RuntimeError(
-                                f"FATAL: Negative relative Photon-Zeit detektiert!\n"
-                                f"  Opt-File: {opt_file}, run_id={run_id}\n"
+                                f"FATAL: negative relative photon time detected!\n"
+                                f"  Optical file: {opt_file}, run_id={run_id}\n"
                                 f"  muon_id={int(muon_ids[first_bad])}, nC_id={int(nc_ids[first_bad])}\n"
                                 f"  photon_time={float(photon_times[first_bad]):.4f} ns, "
                                 f"nC_time={float(nc_times_arr[first_bad]):.4f} ns\n"
                                 f"  relative_time={float(relative_times[first_bad]):.4f} ns\n"
-                                f"  {int(np.sum(negative_mask))} Photonen mit negativer relativer Zeit."
+                                f"  {int(np.sum(negative_mask))} photons with negative relative time."
                             )
 
                         # Clamp rounding artifacts in [-1 ns, 0) to 0
@@ -1229,7 +1250,9 @@ def scan_optical_and_aggregate(
                         if len(x) == 0:
                             continue
 
-                        # Filter 3: Momentum
+                        # Filter 3 (direction): keep photons that hit the surface from
+                        # inside the tank: moving down at the bottom, up at the top,
+                        # outwards at the wall
                         mask_bot = z <= z_cut_bot
                         mask_top = z >= z_cut_top
                         mask_barrel = ~mask_bot & ~mask_top
@@ -1252,13 +1275,14 @@ def scan_optical_and_aggregate(
 
                         file_matched += len(x)
 
-                        # Voxel-Zuordnung (vektorisiert — Batch-KDTree)
+                        # Voxel assignment: one batched KD-tree query for the whole chunk
                         points = np.column_stack((x, y, z))
                         _, voxel_idx_array = voxel_tree.query(points)
                         voxel_index_strings = np.array(
                             [str(voxel_data[vi]['index']) for vi in voxel_idx_array]
                         )
 
+                        # Group the photons by NC and add them to the NC's hit counter
                         muon_ids_int = muon_ids.astype(np.int64)
                         nc_ids_int = nc_ids.astype(np.int64)
                         paired = np.stack([muon_ids_int, nc_ids_int], axis=1)
@@ -1283,30 +1307,30 @@ def scan_optical_and_aggregate(
             except RuntimeError:
                 raise
             except Exception as e:
-                print(f"      FEHLER beim Verarbeiten von {opt_file}: {e}")
+                print(f"      ERROR processing {opt_file}: {e}")
                 raise
 
             total_unassigned += file_unassigned
             total_orphaned += file_orphaned
-            print(f"      Matched: {file_matched}, Orphaned: {file_orphaned}, Unassigned: {file_unassigned}")
+            print(f"      Matched: {file_matched}, orphaned: {file_orphaned}, unassigned: {file_unassigned}")
 
         run_elapsed = time.time() - phase2_start
-        print(f"  Run {run_id} abgeschlossen in {run_elapsed/60:.1f} min (kumulativ)")
+        print(f"  Run {run_id} finished after {run_elapsed/60:.1f} min (cumulative)")
         if file_counter % 50 == 0:
-            print_memory_usage(f"Nach {file_counter} optischen Files")
+            print_memory_usage(f"after {file_counter} optical files")
 
     ncs_with_photons = sum(1 for c in nc_voxel_counters.values() if c)
     ncs_without_photons = len(nc_data_dict) - ncs_with_photons
     total_hits = sum(sum(c.values()) for c in nc_voxel_counters.values())
 
     phase2_elapsed = time.time() - phase2_start
-    print(f"\n  ✓ Optischer Scan abgeschlossen in {phase2_elapsed/60:.1f} min:")
-    print(f"    NC-Events mit Photonen: {ncs_with_photons}")
-    print(f"    NC-Events ohne Photonen: {ncs_without_photons}")
-    print(f"    Gesamte Voxel-Hits (summiert über alle Sim): {total_hits}")
-    print(f"    Nicht zugeordnete Photonen: {total_unassigned}")
-    print(f"    Orphaned Photonen (kein NC): {total_orphaned}")
-    print_memory_usage("Nach Phase 2")
+    print(f"\n  ✓ Optical scan finished in {phase2_elapsed/60:.1f} min:")
+    print(f"    NC events with photons: {ncs_with_photons}")
+    print(f"    NC events without photons: {ncs_without_photons}")
+    print(f"    Total voxel hits (summed over all simulations): {total_hits}")
+    print(f"    Unassigned photons: {total_unassigned}")
+    print(f"    Orphaned photons (no NC): {total_orphaned}")
+    print_memory_usage("after Phase 2")
 
     successfully_scanned_runs = set(combined_files_by_run.keys())
 
@@ -1314,7 +1338,7 @@ def scan_optical_and_aggregate(
 
 
 # ============================================================================
-# Phase 3: Zusammenführung und HDF5-Output
+# Phase 3: Merge NC data and hits, write the output
 # ============================================================================
 
 def write_output_in_batches(
@@ -1326,14 +1350,32 @@ def write_output_in_batches(
     output_file: str,
     weight: float,
     batch_size: int = 10000,
+    progress_tracker: Optional["ProgressTracker"] = None,
+    skip_keys: frozenset = frozenset(),
 ) -> dict:
     """
-    Erstellt Output-Daten batchweise und schreibt direkt in HDF5.
-    Identisches Output-Format wie musun2SimFullPostprocessing.py.
+    Build the output rows batch by batch and append them directly to the HDF5 file.
+
+    Writing in batches keeps the memory usage bounded for large datasets.
+
+    Args:
+        nc_data_dict: NC data {(run_id, muon_id, nC_id): nc_info}
+        nc_voxel_counters: aggregated hits {(run_id, muon_id, nC_id): Counter}
+        voxel_data: voxel definitions
+        voxel_indices: voxel indices in column order of target_matrix
+        geometry_params: geometry parameters
+        output_file: path of the HDF5 file
+        weight: per-event weight written to 'weights'
+        batch_size: number of NC events per batch
+        progress_tracker: if given, the committed row count is saved after each batch
+        skip_keys: NC keys already present in the output (resume); they are not written again
+
+    Returns:
+        dict with nc_with_photons, nc_without_photons, total_written (rows written in this call)
     """
-    print(f"\n=== Phase 3: Schreibe Output batchweise für {len(nc_data_dict)} NC-Events ===")
+    print(f"\n=== Phase 3: writing output in batches for {len(nc_data_dict)} NC events ===")
     phase3_start = time.time()
-    print(f"  Batch-Size: {batch_size}")
+    print(f"  Batch size: {batch_size}")
 
     r_zylinder = geometry_params['r_zylinder']
     h_zylinder = geometry_params['h_zylinder']
@@ -1344,7 +1386,11 @@ def write_output_in_batches(
     nc_with_photons = 0
     total_written = 0
 
-    all_keys = list(nc_data_dict.keys())
+    # On resume, NCs that are already in the output file are skipped.
+    all_keys = [key for key in nc_data_dict.keys() if key not in skip_keys]
+    if skip_keys:
+        print(f"  Resume: {len(nc_data_dict) - len(all_keys)} NC events already written, "
+              f"{len(all_keys)} remaining")
     num_batches = (len(all_keys) - 1) // batch_size + 1
 
     for batch_idx in range(num_batches):
@@ -1375,6 +1421,7 @@ def write_output_in_batches(
             n_gamma = max(0, nc_info['gamma_amount'])
             e_tot = max(0, nc_info['gamma_tot_energy'])
 
+            # Up to 4 capture gammas; negative energies mark missing gammas and are zeroed
             gamma_row = []
             for i in range(4):
                 e = nc_info['gamma_energies'][i]
@@ -1385,12 +1432,14 @@ def write_output_in_batches(
                     e, px, py, pz = 0.0, 0.0, 0.0, 0.0
                 gamma_row.extend([e, px, py, pz])
 
+            # Cylindrical coordinates and signed distances to the SSD (positive inside)
             r_NC = np.sqrt(x**2 + y**2)
             phi_NC = np.arctan2(y, x)
             dist_to_wall = r_zylinder - r_NC
             dist_to_bot = z - z_cut_bot
             dist_to_top = z_cut_top - z
 
+            # Mean gamma momentum direction in cylindrical components (gammas with E > 0 only)
             p_r_values = []
             p_z_values = []
             for i in range(4):
@@ -1408,6 +1457,7 @@ def write_output_in_batches(
             nC_time = nc_info['nC_time']
             flag_ge77 = nc_info['nC_flag_Ge77']
 
+            # Column order must match phi_columns in create_or_open_output_file()
             phi_row = [x, y, z, mat_id, vol_id, n_gamma, e_tot,
                        r_NC, phi_NC, dist_to_wall, dist_to_bot, dist_to_top,
                        p_mean_r, p_mean_z,
@@ -1415,6 +1465,7 @@ def write_output_in_batches(
 
             target_row = [voxel_counter.get(str(voxel_idx), 0) for voxel_idx in voxel_indices]
 
+            # Hits per detector region (pit, bot, wall, top)
             region_hits = {'pit': 0, 'bot': 0, 'wall': 0, 'top': 0}
             for voxel_idx_str, count in voxel_counter.items():
                 voxel_info = next((v for v in voxel_data if str(v['index']) == voxel_idx_str), None)
@@ -1441,18 +1492,24 @@ def write_output_in_batches(
         entries = append_results_to_hdf5(output_file, batch_result, voxel_indices, weight)
         total_written += entries
 
+        # Record the batch only after it is completely written, so that a
+        # restart can discard rows of a batch that was interrupted mid-write.
+        if progress_tracker is not None:
+            progress_tracker.progress_data['rows_committed'] += entries
+            progress_tracker.save_progress()
+
         del phi_data_batch, target_data_batch, target_regions_batch, event_ids_batch, batch_result
         gc.collect()
 
         if (batch_idx + 1) % 10 == 0 or batch_idx == num_batches - 1:
-            print(f"  Batch {batch_idx + 1}/{num_batches}: {total_written} Einträge geschrieben")
+            print(f"  Batch {batch_idx + 1}/{num_batches}: {total_written} entries written")
 
     phase3_elapsed = time.time() - phase3_start
-    print(f"\n  ✓ Schreiben abgeschlossen in {phase3_elapsed/60:.1f} min:")
-    print(f"    NC-Events mit Photonen: {nc_with_photons}")
-    print(f"    NC-Events ohne Photonen: {nc_without_photons}")
-    print(f"    Gesamt geschrieben: {total_written}")
-    print_memory_usage("Nach batchweisem Schreiben")
+    print(f"\n  ✓ Writing finished in {phase3_elapsed/60:.1f} min:")
+    print(f"    NC events with photons: {nc_with_photons}")
+    print(f"    NC events without photons: {nc_without_photons}")
+    print(f"    Total written: {total_written}")
+    print_memory_usage("after writing in batches")
 
     return {
         'nc_with_photons': nc_with_photons,
@@ -1460,15 +1517,24 @@ def write_output_in_batches(
         'total_written': total_written,
     }
 
-
 # ============================================================================
 # HDF5 Output
 # ============================================================================
 
 def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol_map, radius, n_primaries=0, suffix=""):
-    """
-    Erstellt eine neue HDF5-Datei oder öffnet eine bestehende.
-    Identisches Format wie musun2SimFullPostprocessing.py.
+    """Create the output HDF5 file, or return the path of an existing one.
+
+    Layout (one row per NC in all row-aligned datasets):
+      phi_matrix      (n_events, 32)       float32  NC features, names in phi_columns
+      target_matrix   (n_events, n_voxels) int32    photon hits per voxel, voxel indices in target_columns
+      region_matrix   (n_events, 4)        int32    photon hits per region, names in region_columns
+      event_ids       (n_events, 3)        int64    (run_id, muon_id, nc_id), names in event_id_columns
+      weights         (n_events,)          float32  constant 1/N_NC (not used downstream)
+    Static metadata: voxel geometry (voxels/, voxel_metadata), the global
+    material/volume mappings (mat_map/, vol_map/), the SSD radius
+    (theta/inner_radius_in_mm) and the number of simulated muons (primaries),
+    which is needed downstream to normalize Ge77 rates to all muons, because
+    the simulation output only contains muons that interacted.
     """
     output_file = os.path.join(output_path, f"ncscore_output_{file_index}{suffix}.hdf5")
 
@@ -1477,13 +1543,13 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
             with h5py.File(output_file, 'r') as f:
                 if ('phi_matrix' in f and 'target_matrix' in f and
                         'voxels' in f and 'voxel_metadata' in f and 'event_ids' in f):
-                    print(f"Bestehende Output-Datei gefunden: {output_file}")
+                    print(f"Existing output file found: {output_file}")
                     return output_file
         except:
-            print(f"Bestehende Datei ist korrupt, erstelle neue: {output_file}")
+            print(f"Existing file is corrupt, creating a new one: {output_file}")
             os.remove(output_file)
 
-    print(f"Erstelle neue Output-Datei: {output_file}")
+    print(f"Creating new output file: {output_file}")
 
     voxel_indices = [voxel['index'] for voxel in voxel_data]
     n_voxels = len(voxel_indices)
@@ -1499,12 +1565,16 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
     region_columns = ['pit', 'bot', 'wall', 'top']
     event_id_columns = ["run_id", "muon_id", "nc_id"]
 
+    # Force 64-bit offsets and lengths in the superblock (for files > 2 GB).
+    # See: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t11.html
+    # (superblock fields "Size of Offsets" and "Size of Lengths" set to 8 bytes)
     fcpl = h5py.h5p.create(h5py.h5p.FILE_CREATE)
-    fcpl.set_sizes(8, 8)
+    fcpl.set_sizes(8, 8)  # 8 bytes = 64 bit for offsets and lengths
     fapl = h5py.h5p.create(h5py.h5p.FILE_ACCESS)
     fapl.set_libver_bounds(h5py.h5f.LIBVER_LATEST, h5py.h5f.LIBVER_LATEST)
     fid = h5py.h5f.create(output_file.encode(), h5py.h5f.ACC_TRUNC, fcpl=fcpl, fapl=fapl)
     with h5py.File(fid) as out:
+        # === Resizable 2D datasets (one row per NC) ===
         out.create_dataset(
             "target_matrix",
             shape=(0, n_voxels),
@@ -1529,6 +1599,8 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
             chunks=(1000, len(region_columns)),
             compression='lzf'
         )
+
+        # === Event IDs (run_id, muon_id, nc_id) ===
         out.create_dataset(
             "event_ids",
             shape=(0, len(event_id_columns)),
@@ -1538,12 +1610,14 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
             compression='lzf'
         )
 
+        # === Column names (column index -> name) ===
         dt = h5py.string_dtype(encoding='utf-8')
         out.create_dataset("target_columns", data=[str(idx) for idx in voxel_indices], dtype=dt)
         out.create_dataset("phi_columns", data=phi_columns, dtype=dt)
         out.create_dataset("region_columns", data=region_columns, dtype=dt)
         out.create_dataset("event_id_columns", data=event_id_columns, dtype=dt)
 
+        # === Static data ===
         theta_grp = out.create_group("theta")
         theta_grp.create_dataset("inner_radius_in_mm", data=radius)
         out.create_dataset("primaries", data=n_primaries)
@@ -1569,8 +1643,9 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
             compression='lzf'
         )
 
+        # === Voxel geometry: center, layer and corners of every voxel ===
         voxels_grp = out.create_group("voxels")
-        print(f"  Initialisiere {len(voxel_data)} Voxel-Metadaten...")
+        print(f"  Initializing metadata of {len(voxel_data)} voxels...")
         for voxel in voxel_data:
             if isinstance(voxel, dict):
                 voxel_idx = voxel['index']
@@ -1584,8 +1659,10 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
                 corners_grp.create_dataset("y", data=corners[:, 1])
                 corners_grp.create_dataset("z", data=corners[:, 2])
 
-        print(f"  ✓ Alle {len(voxel_data)} Voxel-Metadaten erstellt")
+        print(f"  ✓ Metadata of all {len(voxel_data)} voxels created")
 
+        # voxel_metadata: one row per voxel, in the column order of target_matrix:
+        # [is_pit, is_bot, is_wall, is_top, r, phi, z] of the voxel center
         voxel_metadata = []
         for voxel in voxel_data:
             center = np.array(voxel['center'], dtype=np.float32)
@@ -1601,12 +1678,13 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
 
         voxel_metadata = np.array(voxel_metadata, dtype=np.float32)
         out.create_dataset("voxel_metadata", data=voxel_metadata, dtype=np.float32, compression='lzf')
-        print(f"  ✓ Voxel Metadata erstellt: Shape {voxel_metadata.shape}")
+        print(f"  ✓ Voxel metadata created: shape {voxel_metadata.shape}")
 
     return output_file
 
 
 def append_results_to_hdf5(output_file, result_data, voxel_indices, weight):
+    """Append rows to the resizable output datasets; returns the number of rows written."""
     phi_data = result_data['phi_data']
     target_data = result_data['target_data']
     target_regions_data = result_data.get('target_regions')
@@ -1654,17 +1732,17 @@ def append_results_to_hdf5(output_file, result_data, voxel_indices, weight):
 
 def parse_arguments():
     parser = argparse.ArgumentParser(
-        description='Post-Processing: Neutron Captures + mehrere optische Simulationen (summiert)',
+        description='Post-processing: neutron captures + several optical simulations (summed)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Drei-Quellen-Workflow:
-  -i1: NC-Daten (Sim1, run_NNN/ Unterordner)
-  -i2: Erste optische Simulation (run_NNN/ Unterordner, eine Sim pro Run)
-  -i3: Mehrfache optische Simulationen (run_NNN/sim_NNN/ Struktur)
+Three-source workflow:
+  -i1: NC data (sim1, run_NNN/ subdirectories)
+  -i2: first optical simulation (run_NNN/ subdirectories, one simulation per run)
+  -i3: further optical simulations (run_NNN/sim_NNN/ structure)
 
-Die optischen Hits aus -i2 und ALLEN sim_NNN in -i3 werden für jeden NC-Event summiert.
+The optical hits of -i2 and of ALL sim_NNN in -i3 are summed for every NC event.
 
-Beispiel:
+Example:
   python %(prog)s \\
     -i1 /path/to/sim1 \\
     -i2 /path/to/sim2 \\
@@ -1675,49 +1753,52 @@ Beispiel:
     )
 
     parser.add_argument('-i1', '--input-sim1', required=True,
-                        help='Eingabe-Pfad für Simulation 1 (NC-Daten)')
+                        help='Input directory of simulation 1 (NC data)')
     parser.add_argument('-i2', '--input-sim2', required=True,
-                        help='Eingabe-Pfad für Simulation 2 (erste optische Simulation, run_NNN/)')
+                        help='Input directory of simulation 2 (first optical simulation, run_NNN/)')
     parser.add_argument('-i3', '--input-sim3', required=True,
-                        help='Eingabe-Pfad für mehrfache optische Simulationen (run_NNN/sim_NNN/)')
+                        help='Input directory of the further optical simulations (run_NNN/sim_NNN/)')
     parser.add_argument('-o', '--output', required=True,
-                        help='Ausgabe-Pfad für Ergebnisse')
+                        help='Output directory')
 
+    # Mapping and voxel files. The defaults point to the author's cluster
+    # installation; pass the files in src/mappings and src/voxels explicitly elsewhere.
     parser.add_argument('-m', '--material-mapping',
                         default='/global/cfs/projectdirs/legend/users/tbuerger/postprocessing/src/mappings/globalMaterialMappings.json',
-                        help='Pfad zur Material-Mapping-Datei')
+                        help='Global material mapping (JSON, extended in place with new materials)')
     parser.add_argument('-v', '--volume-mapping',
                         default='/global/cfs/projectdirs/legend/users/tbuerger/postprocessing/src/mappings/globalPhysVolMappings.json',
-                        help='Pfad zur Volume-Mapping-Datei')
+                        help='Global physical volume mapping (JSON, extended in place with new volumes)')
     parser.add_argument('-x', '--voxel-file',
                         default='/global/cfs/projectdirs/legend/users/tbuerger/postprocessing/src/voxels/currentDistZylVoxelsPMTSize.json',
-                        help='Pfad zur Voxel-Datei')
+                        help='Voxel definition of the SSD (JSON)')
 
     parser.add_argument('--reset', action='store_true',
-                        help='Verarbeitung von vorne beginnen')
+                        help='Start from scratch (deletes existing output, progress and scan checkpoint)')
     parser.add_argument('--sample-weight', type=int, default=50,
-                        help='Anzahl Sim1-Files für Gewichtungsberechnung (0 = alle)')
+                        help='Number of sim1 files used to estimate the event weight (0 = all)')
     parser.add_argument('--nested', action='store_true',
-                        help='Suche HDF5-Dateien in run_*/Unterordnern (gilt für Sim1 und Sim2)')
+                        help='Search for HDF5 files in run_NNN subdirectories (applies to sim1 and sim2)')
 
     parser.add_argument('-g', '--geometry', default='currentDist',
                         choices=['currentDist'],
-                        help='Geometrie-Name (default: currentDist)')
+                        help='Geometry name (default: currentDist)')
     parser.add_argument('--valid-detectors', type=int, nargs='+',
                         default=[1965, 1966, 1967, 1968],
-                        help='Liste der gültigen Detector UIDs')
+                        help='Detector UIDs of the SSD surfaces')
     parser.add_argument('--verbose', '-V', action='store_true',
-                        help='Ausführliche Ausgabe')
+                        help='No effect (kept for compatibility)')
     parser.add_argument('--muons-per-run', type=int, required=True,
-                        help='Anzahl simulierter Myonen pro Run (für primaries-Dataset im Output)')
+                        help='Number of muons each sim1 run (run_NNN, all thread files together) '
+                             'was started with; stored as primaries = runs x muons-per-run')
     parser.add_argument('--sim3-runs', type=int, nargs='+', default=None,
                         metavar='RUN_ID',
-                        help='Welche Run-IDs aus Sim3 verarbeitet werden sollen (z.B. --sim3-runs 1 '
-                             'oder --sim3-runs 1 2 3). Nur diese Runs werden in den Output '
-                             'geschrieben; alle anderen werden übersprungen. Fehlt diese Option, '
-                             'werden alle in Sim3 vorhandenen Runs verwendet. Alle angegebenen '
-                             'Runs müssen dieselbe Anzahl an sim_***-Verzeichnissen besitzen, '
-                             'sonst wird abgebrochen.')
+                        help='Run IDs of sim3 to process (e.g. --sim3-runs 1 '
+                             'or --sim3-runs 1 2 3). Only these runs are written to the '
+                             'output; all others are skipped. Without this option, '
+                             'all runs present in sim3 are used. All selected '
+                             'runs must have the same set of sim_*** directories, '
+                             'otherwise the script aborts.')
 
     return parser.parse_args()
 
@@ -1728,50 +1809,50 @@ Beispiel:
 
 def main():
     args = parse_arguments()
-    print_memory_usage("Hauptprogramm Start")
+    print_memory_usage("main start")
 
     for label, path in [('Sim1', args.input_sim1), ('Sim2', args.input_sim2),
                         ('Sim3', args.input_sim3)]:
         if not os.path.exists(path):
-            print(f"Fehler: {label}-Pfad existiert nicht: {path}")
+            print(f"Error: {label} path does not exist: {path}")
             sys.exit(1)
     if not os.path.exists(args.voxel_file):
-        print(f"Fehler: Voxel-Datei existiert nicht: {args.voxel_file}")
+        print(f"Error: voxel file does not exist: {args.voxel_file}")
         sys.exit(1)
 
     os.makedirs(args.output, exist_ok=True)
 
-    # === Struktur validieren ===
-    print("\n=== Validiere Eingabe-Strukturen ===")
+    # === Validate the input structures ===
+    print("\n=== Validating input structures ===")
     if args.nested:
         validate_run_structure(args.input_sim1, nested=True, label="Sim1")
         validate_run_structure(args.input_sim2, nested=True, label="Sim2")
-        print("=== Prüfe Konsistenz Sim1 ↔ Sim2 ===")
+        print("=== Checking consistency Sim1 ↔ Sim2 ===")
         validate_sim1_sim2_consistency(args.input_sim1, args.input_sim2)
     else:
         validate_run_structure(args.input_sim1, nested=False, label="Sim1")
         validate_run_structure(args.input_sim2, nested=False, label="Sim2")
 
-    print("\n=== Validiere Sim3-Struktur (run_NNN/sim_NNN/) ===")
+    print("\n=== Validating Sim3 structure (run_NNN/sim_NNN/) ===")
     sim3_summary = validate_sim3_structure(args.input_sim3)
 
     # Resolve which runs to process
     all_sim3_run_ids = set(sim3_summary.keys())
     if args.sim3_runs is not None:
         active_run_ids = set(args.sim3_runs)
-        print(f"\n--sim3-runs angegeben: verarbeite nur Run(s) {sorted(active_run_ids)}")
+        print(f"\n--sim3-runs given: processing only run(s) {sorted(active_run_ids)}")
     else:
         active_run_ids = all_sim3_run_ids
-        print(f"\nKein --sim3-runs angegeben: verarbeite alle {len(active_run_ids)} Sim3-Run(s)")
+        print(f"\nNo --sim3-runs given: processing all {len(active_run_ids)} Sim3 run(s)")
 
-    print("=== Prüfe Konsistenz Sim1 ↔ Sim3 (nur aktive Runs) ===")
+    print("=== Checking consistency Sim1 ↔ Sim3 (active runs only) ===")
     try:
         validate_sim1_sim3_consistency(args.input_sim1, args.input_sim3, active_run_ids)
     except RuntimeError as e:
         print(str(e))
         sys.exit(1)
 
-    # === Geometrie ===
+    # === Geometry ===
     geometry_result = defineZylinder(args.geometry, args.valid_detectors)
     (t_zylinder, l_voxel, t_voxel, r_pit, dz_pit, r_zyl_bot, r_zyl_top,
      z_offset, r_zylinder, h_zylinder, z_origin, r_ref, h_ref, z_ref, valid_detectors) = geometry_result
@@ -1782,32 +1863,32 @@ def main():
         'valid_detectors': valid_detectors,
     }
 
-    # === Voxel-Daten laden ===
-    print("Lade Voxel-Daten...")
+    # === Voxel data ===
+    print("Loading voxel data...")
     with open(args.voxel_file, 'r') as f:
         voxel_data = json.load(f)
     voxel_tree = build_voxel_tree(voxel_data)
     voxel_indices = [voxel['index'] for voxel in voxel_data]
-    print(f"Voxel-Tree mit {len(voxel_data)} Voxeln erstellt")
+    print(f"Voxel tree with {len(voxel_data)} voxels built")
 
-    # === Files finden ===
+    # === Find the input files ===
     sim1_files_all = find_all_hdf5_files(args.input_sim1, args.nested)
     if not sim1_files_all:
-        print("Fehler: Keine output_*.hdf5 Dateien in Sim1-Pfad gefunden!")
+        print("Error: no output_*.hdf5 files found in the sim1 path!")
         sys.exit(1)
 
     sim2_files_by_run_all = find_sim2_files(args.input_sim2, args.nested)
     if not sim2_files_by_run_all:
-        print("Fehler: Keine output_t*.hdf5 Dateien in Sim2-Pfad gefunden!")
+        print("Error: no output_t*.hdf5 files found in the sim2 path!")
         sys.exit(1)
 
-    print("\nSuche Sim3-Files...")
+    print("\nSearching for Sim3 files...")
     sim3_files_by_run_all = find_sim3_files(args.input_sim3)
     if not sim3_files_by_run_all:
-        print("Fehler: Keine HDF5-Dateien in Sim3-Pfad gefunden!")
+        print("Error: no HDF5 files found in the sim3 path!")
         sys.exit(1)
 
-    # === Auf aktive Runs filtern ===
+    # === Restrict to the active runs ===
     if args.nested:
         sim1_files = [f for f in sim1_files_all
                       if _extract_run_id_from_path(f) in active_run_ids]
@@ -1822,7 +1903,7 @@ def main():
     sim3_files_by_run = {rid: files for rid, files in sim3_files_by_run_all.items()
                          if rid in active_run_ids}
 
-    # === Run-Selektion zusammenfassen ===
+    # === Summary of the run selection ===
     all_known_run_ids = (
         {_extract_run_id_from_path(f) for f in sim1_files_all}
         | set(sim2_files_by_run_all.keys())
@@ -1832,91 +1913,153 @@ def main():
     skipped_run_ids = all_known_run_ids - active_run_ids
 
     print(f"\n{'='*60}")
-    print(f"RUN-SELEKTION")
+    print(f"RUN SELECTION")
     print(f"{'='*60}")
-    print(f"  Aktive Runs   : {sorted(active_run_ids)}")
+    print(f"  Active runs : {sorted(active_run_ids)}")
     if skipped_run_ids:
-        print(f"  Übersprungene : {sorted(skipped_run_ids)}  ← nicht in --sim3-runs, werden NICHT in Output geschrieben")
+        print(f"  Skipped     : {sorted(skipped_run_ids)}  ← not in --sim3-runs, NOT written to the output")
     else:
-        print(f"  Übersprungene : keine")
+        print(f"  Skipped     : none")
     print(f"{'='*60}")
 
     total_sim3_sims = sum(len(sims) for run_id, sims in sim3_summary.items()
                           if run_id in active_run_ids)
     total_sim2_files = sum(len(v) for v in sim2_files_by_run.values())
     total_sim3_files = sum(len(v) for v in sim3_files_by_run.values())
-    print(f"Sim1: {len(sim1_files)} Dateien (aktive Runs)")
-    print(f"Sim2: {total_sim2_files} Dateien in {len(sim2_files_by_run)} aktiven Runs")
-    print(f"Sim3: {total_sim3_files} Dateien in {total_sim3_sims} sim_***-Verzeichnissen über {len(sim3_files_by_run)} aktive Runs")
+    print(f"Sim1: {len(sim1_files)} files (active runs)")
+    print(f"Sim2: {total_sim2_files} files in {len(sim2_files_by_run)} active runs")
+    print(f"Sim3: {total_sim3_files} files in {total_sim3_sims} sim_*** directories of {len(sim3_files_by_run)} active runs")
 
-    # === Sim2 + Sim3 Files kombinieren ===
+    # === Combine the sim2 and sim3 files ===
     combined_files_by_run = combine_optical_files(sim2_files_by_run, sim3_files_by_run)
     total_combined = sum(len(v) for v in combined_files_by_run.values())
-    print(f"\nKombinierte optische Files: {total_combined} ({total_sim2_files} Sim2 + {total_sim3_files} Sim3)")
+    print(f"\nCombined optical files: {total_combined} ({total_sim2_files} Sim2 + {total_sim3_files} Sim3)")
     for run_id in sorted(combined_files_by_run.keys()):
         n2 = len(sim2_files_by_run.get(run_id, []))
         n3 = len(sim3_files_by_run.get(run_id, []))
-        print(f"  run_{run_id:03d}: {n2} Sim2 + {n3} Sim3 = {n2+n3} optische Files")
+        print(f"  run_{run_id:03d}: {n2} Sim2 + {n3} Sim3 = {n2+n3} optical files")
 
-    # === HDF5-Integritätsprüfung aller optischen Files ===
+    # === Integrity check of all optical input files ===
     if not check_hdf5_integrity(combined_files_by_run, args.output):
-        print("\nAbbruch: fehlerhafte HDF5-Dateien gefunden. Fehlerliste siehe faulty_simulations.txt.")
+        print("\nAborting: faulty HDF5 files found. See faulty_simulations.txt for the list.")
         sys.exit(1)
 
-    # === Output-Datei ===
+    # === Output file ===
     output_file = os.path.join(args.output, "ncscore_output_0.hdf5")
     progress_tracker = ProgressTracker(args.output, output_file)
 
     if args.reset:
-        print("Reset angefordert - lösche bestehende Ergebnisse...")
+        print("Reset requested - deleting existing results...")
         if os.path.exists(output_file):
             os.remove(output_file)
         progress_tracker.cleanup()
         progress_tracker = ProgressTracker(args.output, output_file)
 
-    # === Materialien & Volumes ===
+    # === Resume logic ===
+    # Settings that must be identical between an interrupted run and its resume.
+    run_config = {
+        'input_sim1': os.path.abspath(args.input_sim1),
+        'input_sim2': os.path.abspath(args.input_sim2),
+        'input_sim3': os.path.abspath(args.input_sim3),
+        'active_runs': sorted(active_run_ids),
+        'voxel_file': os.path.abspath(args.voxel_file),
+        'nested': args.nested,
+        'valid_detectors': list(valid_detectors),
+        'muons_per_run': args.muons_per_run,
+    }
+    resuming = os.path.exists(output_file)
+    if resuming:
+        if is_output_complete(output_file):
+            print(f"Output is already complete: {output_file}")
+            print("Use --reset to recompute it.")
+            return
+        if not progress_tracker.progress_file.exists():
+            print(f"Error: {output_file} exists but is incomplete and has no progress file, "
+                  f"so it cannot be resumed safely. Use --reset to recompute it.")
+            sys.exit(1)
+        saved_config = progress_tracker.progress_data.get('config')
+        if saved_config != run_config:
+            print("Error: the settings differ from those of the interrupted run.")
+            print(f"  saved  : {saved_config}")
+            print(f"  current: {run_config}")
+            print("Resume with the original settings or start over with --reset.")
+            sys.exit(1)
+        print(f"Resuming interrupted run "
+              f"({progress_tracker.progress_data.get('rows_committed', 0)} rows already written)")
+    else:
+        # Fresh start: discard stale progress/checkpoint files of an earlier attempt.
+        progress_tracker.cleanup()
+        progress_tracker = ProgressTracker(args.output, output_file)
+        progress_tracker.progress_data['config'] = run_config
+        progress_tracker.save_progress()
+
+    # === Global material & volume mappings (completed only for a new run) ===
     if not os.path.exists(output_file):
         all_materials = collect_all_materials_first(sim1_files)
         all_volumes = collect_all_volumes_first(sim1_files)
         global_material_mapping = create_global_material_mapping(all_materials, args.material_mapping)
-        print(f"Globales Material-Mapping: {len(global_material_mapping)} Materialien")
+        print(f"Global material mapping: {len(global_material_mapping)} materials")
         global_volume_mapping = create_global_volume_mapping(all_volumes, args.volume_mapping)
-        print(f"Globales Volume-Mapping: {len(global_volume_mapping)} Volumen")
+        print(f"Global volume mapping: {len(global_volume_mapping)} volumes")
     else:
         global_material_mapping = loadMapping(args.material_mapping)
-        print(f"Bestehendes Material-Mapping geladen: {len(global_material_mapping)} Materialien")
+        print(f"Existing material mapping loaded: {len(global_material_mapping)} materials")
         global_volume_mapping = loadMapping(args.volume_mapping)
-        print(f"Bestehendes Volume-Mapping geladen: {len(global_volume_mapping)} Volumen")
+        print(f"Existing volume mapping loaded: {len(global_volume_mapping)} volumes")
 
-    # === Gewichtung (basiert nur auf Sim1, identisch zur Referenz-Implementierung) ===
+    # === Event weight (based on sim1 only, as in musun2SimFullPostprocessing.py) ===
     sample_size = args.sample_weight if args.sample_weight > 0 else None
     weight = calculate_weight_from_files(sim1_files, sample_size)
 
-    # === Output-Datei erstellen ===
-    n_primaries = len(sim1_files) * args.muons_per_run
+    # === Output file ===
+    # --muons-per-run refers to one run_NNN simulation (all thread files together).
+    # Only runs that also have optical data end up in the output.
+    sim1_run_ids = {
+        _extract_run_id_from_path(f) if args.nested else 0
+        for f in sim1_files
+    }
+    n_runs = len(sim1_run_ids & set(combined_files_by_run))
+    n_primaries = n_runs * args.muons_per_run
     output_file = create_or_open_output_file(
         args.output, 0, voxel_data, global_material_mapping,
         global_volume_mapping, r_zylinder, n_primaries=n_primaries
     )
 
+    written_keys = set()
+    if resuming:
+        rows_committed, written_keys = prepare_output_for_resume(
+            output_file, progress_tracker.progress_data.get('rows_committed', 0)
+        )
+        progress_tracker.progress_data['rows_committed'] = rows_committed
+        progress_tracker.save_progress()
+
     # =======================================================================
-    # Hauptverarbeitung
+    # Main processing
     # =======================================================================
     start_time = time.time()
 
     try:
-        # Phase 1: NC-Daten aus Sim1 laden
+        # Phase 1: load the NC data from sim1
         nc_data_dict = load_all_nc_data_from_sim1(
             sim1_files, args.material_mapping, args.volume_mapping,
             nested=args.nested
         )
 
-        # Phase 2: Alle optischen Files (Sim2 + Sim3) scannen, Hits summieren
-        nc_voxel_counters, total_unassigned, total_orphaned, scanned_runs = scan_optical_and_aggregate(
-            combined_files_by_run, nc_data_dict, voxel_tree, voxel_data, geometry_params
-        )
+        # Phase 2: scan all optical files (sim2 + sim3) and sum the hits
+        # (skipped if a previous run already saved the scan result)
+        checkpoint = progress_tracker.scan_checkpoint_file
+        if progress_tracker.is_sim2_scan_complete() and checkpoint.exists():
+            print(f"\n=== Phase 2: loading scan checkpoint {checkpoint} (scan skipped) ===")
+            nc_voxel_counters, total_unassigned, total_orphaned, scanned_runs = load_scan_checkpoint(checkpoint)
+        else:
+            nc_voxel_counters, total_unassigned, total_orphaned, scanned_runs = scan_optical_and_aggregate(
+                combined_files_by_run, nc_data_dict, voxel_tree, voxel_data, geometry_params
+            )
+            save_scan_checkpoint(checkpoint, nc_voxel_counters, total_unassigned,
+                                 total_orphaned, scanned_runs)
+            progress_tracker.mark_sim2_scan_complete()
 
-        # NCs aus Runs ohne optische Daten entfernen
+        # Drop NCs of runs without optical data
         nc_keys_before = len(nc_data_dict)
         nc_data_dict = {
             key: val for key, val in nc_data_dict.items()
@@ -1924,53 +2067,55 @@ def main():
         }
         nc_dropped = nc_keys_before - len(nc_data_dict)
         if nc_dropped > 0:
-            print(f"  ⚠ {nc_dropped} NC-Events aus Runs ohne optische Daten entfernt")
+            print(f"  ⚠ {nc_dropped} NC events of runs without optical data removed")
 
-        # Phase 3: Output batchweise schreiben
+        # Phase 3: write the output in batches
         output_stats = write_output_in_batches(
             nc_data_dict, nc_voxel_counters, voxel_data, voxel_indices,
-            geometry_params, output_file, weight, batch_size=10000
+            geometry_params, output_file, weight, batch_size=10000,
+            progress_tracker=progress_tracker, skip_keys=written_keys
         )
 
-        total_entries = output_stats['total_written']
+        total_entries = progress_tracker.progress_data['rows_committed']
 
         del nc_data_dict, nc_voxel_counters
         gc.collect()
 
-        progress_tracker.verify_hdf5_integrity(output_file)
+        if progress_tracker.verify_hdf5_integrity(output_file):
+            mark_output_complete(output_file)
 
     except KeyboardInterrupt:
-        print(f"\nVerarbeitung durch Benutzer unterbrochen.")
-        print(f"Fortschritt wurde gespeichert.")
+        print(f"\nProcessing interrupted by user.")
+        print("Progress has been saved. Run the same command again to resume.")
         return
     except Exception as e:
-        print(f"\nKritischer Fehler: {e}")
+        print(f"\nCritical error: {e}")
         import traceback
         traceback.print_exc()
         return
 
     # =======================================================================
-    # Finale Statistiken
+    # Final statistics
     # =======================================================================
     total_time = time.time() - start_time
 
     print(f"\n{'='*60}")
-    print(f"VERARBEITUNG ABGESCHLOSSEN")
+    print(f"PROCESSING FINISHED")
     print(f"{'='*60}")
-    print(f"Sim1-Files (NC-Daten): {len(sim1_files)}")
-    print(f"Sim2-Files (erste optische Sim): {total_sim2_files}")
-    print(f"Sim3-Files (mehrfache optische Sim, summiert): {total_sim3_files} in {total_sim3_sims} sim_***-Dirs")
-    print(f"Optische Files gesamt (Sim2 + Sim3): {total_combined}")
-    print(f"NC-Events gesamt: {total_entries}")
-    print(f"NC mit Photonen: {output_stats['nc_with_photons']}")
-    print(f"NC ohne Photonen: {output_stats['nc_without_photons']}")
-    print(f"Nicht zugeordnete Photonen: {total_unassigned}")
-    print(f"Orphaned Photonen: {total_orphaned}")
-    print(f"Gesamtlaufzeit: {total_time / 60:.1f} min")
-    print(f"Output-Datei: {output_file}")
+    print(f"Sim1 files (NC data): {len(sim1_files)}")
+    print(f"Sim2 files (first optical simulation): {total_sim2_files}")
+    print(f"Sim3 files (further optical simulations, summed): {total_sim3_files} in {total_sim3_sims} sim_*** dirs")
+    print(f"Optical files in total (Sim2 + Sim3): {total_combined}")
+    print(f"NC events total: {total_entries}")
+    print(f"NC with photons: {output_stats['nc_with_photons']}")
+    print(f"NC without photons: {output_stats['nc_without_photons']}")
+    print(f"Unassigned photons: {total_unassigned}")
+    print(f"Orphaned photons: {total_orphaned}")
+    print(f"Total runtime: {total_time / 60:.1f} min")
+    print(f"Output file: {output_file}")
 
     progress_tracker.cleanup()
-    print_memory_usage("Programm Ende")
+    print_memory_usage("program end")
 
 
 if __name__ == "__main__":

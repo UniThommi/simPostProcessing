@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 # Author: Thomas Buerger (University of Tübingen)
 """
-Extract unique physical volume names from GDML file.
+Extract the unique physical volume names from the GDML geometry of the simulation.
 
-Searches for <physvol name="..."> entries and writes unique names
-to output file, sorted by length then alphabetically.
+Searches for <physvol name="..."> entries and writes the unique names to
+physvol_names.txt, sorted by length, then alphabetically. The list is a
+reference for the volume names that appear in
+src/mappings/globalPhysVolMappings.json and in the name patterns of
+analyse_physVol_groups.py.
+
+The GDML path is set in main().
 """
 
 import re

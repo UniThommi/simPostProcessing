@@ -1,10 +1,18 @@
 # Author: Thomas Buerger (University of Tübingen)
-#
-# Usage:
-#   python src/hdf5_structure/analyze_hdf5.py /path/to/file.hdf5
-#   python src/hdf5_structure/analyze_hdf5.py /path/to/file.hdf5 --output my_structure.txt
-#
-# Output is written to hdf5_structure.txt by default (or the path given via --output).
+"""
+Write a compact, human-readable overview of the structure of an HDF5 file.
+
+Lists every group and dataset with shape and dtype and, for datasets with a
+companion *_columns dataset (e.g. phi_matrix -> phi_columns), the column names.
+Groups and column lists with more than 40 entries are truncated to the first 5.
+The files in data_structure/ were created with this script.
+
+Usage:
+  python src/hdf5_structure/analyze_hdf5.py /path/to/file.hdf5
+  python src/hdf5_structure/analyze_hdf5.py /path/to/file.hdf5 --output my_structure.txt
+
+Output is written to hdf5_structure.txt by default (or the path given via --output).
+"""
 
 import argparse
 import h5py

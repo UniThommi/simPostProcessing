@@ -4,6 +4,15 @@
 Checks whether any NC identified by (muon_id, nc_id) appears in more than one
 output_t*.hdf5 file within a Geant4/REMAGE run directory.
 
+A run writes its NC truth (/hit/MyNeutronCaptureOutput) into several
+output_t*.hdf5 files. Within one run, (muon_id, nc_id) must identify a capture
+uniquely. A pair that shows up in two files points to a simulation problem: the
+per-file processing of zylFullPostprocessingOptimized.py would count the
+capture twice, and the MUSUN scripts would keep only the first record (with a
+warning).
+validate_neutron_capture_consistency.py also rejects such duplicates, but only
+reports example keys; this script shows which files share them.
+
 Usage
 -----
     python check_nc_duplicates.py <run_dir> [<run_dir> ...]

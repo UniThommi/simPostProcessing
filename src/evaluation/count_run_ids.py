@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 # Author: Thomas Buerger (University of Tübingen)
 """
-Zählt die verwendeten run_ids in einer post-prozessierten HDF5-Datei.
+Count the NC events per run_id in a post-processed HDF5 file.
 
-Akzeptiert die Ausgabe beider Post-Processing-Skripte:
-  - zylFullPostprocessingOptimized.py     (event_id_columns = ["run_id", "nc_id"])
-  - musun2SimFullPostprocessing.py        (event_id_columns = ["run_id", "muon_id", "nc_id"])
-  - musun2SimMultiOpticalPostprocessing.py (wie musun2Sim)
+Quick check of which simulation runs ended up in an output file and how many
+NCs each contributes (e.g. after selecting runs with --sim3-runs or when runs
+without optical data were dropped).
 
-In jedem Format ist run_id eine benannte Spalte im 'event_ids'-Dataset. Die
-Spaltenposition wird über das 'event_id_columns'-Metadaten-Dataset bestimmt,
-sodass dieses Skript unabhängig von der Spaltenanzahl funktioniert.
+Works with the output of all post-processing scripts:
+  - zylFullPostprocessingOptimized.py      (event_id_columns = ["run_id", "nc_id"])
+  - musun2SimFullPostprocessing.py         (event_id_columns = ["run_id", "muon_id", "nc_id"])
+  - musun2SimMultiOpticalPostprocessing.py (same as musun2Sim)
 
-Verwendung:
-    python src/evaluation/count_run_ids.py --data /path/to/resum_output_*.hdf5
+The position of the run_id column is taken from the 'event_id_columns'
+metadata, so the script does not depend on the number of columns.
+
+Usage:
+    python src/evaluation/count_run_ids.py --data /path/to/ncscore_output_0.hdf5
 """
 
 import argparse
@@ -31,29 +34,31 @@ def _decode(value):
 
 def count_run_ids(filepath, chunk_size: int = 1_000_000):
     """
-    Liest die run_id-Spalte aus 'event_ids' und gibt einen Counter
-    {run_id: Anzahl Events} zurück.
+    Read the run_id column of 'event_ids' in chunks.
+
+    Returns:
+        (Counter {run_id: number of events}, total number of events)
     """
     with h5py.File(filepath, "r") as f:
         if "event_ids" not in f:
             raise KeyError(
-                f"'event_ids' Dataset fehlt in {filepath}. "
-                f"Ist dies wirklich eine Post-Processing-Ausgabe?"
+                f"'event_ids' dataset missing in {filepath}. "
+                f"Is this really a post-processing output?"
             )
 
-        # Spaltenindex von run_id bestimmen (robust gegenüber 2- vs. 3-Spalten-Format)
+        # Column index of run_id (robust against the 2- vs. 3-column format)
         if "event_id_columns" in f:
             columns = [_decode(c) for c in f["event_id_columns"][:]]
             if "run_id" not in columns:
                 raise KeyError(
-                    f"'run_id' nicht in event_id_columns {columns} gefunden."
+                    f"'run_id' not found in event_id_columns {columns}."
                 )
             run_id_col = columns.index("run_id")
         else:
-            # Fallback: run_id ist in allen Skripten die erste Spalte
+            # Fallback: run_id is the first column in all scripts
             run_id_col = 0
             print(
-                "  Warnung: 'event_id_columns' fehlt, nehme run_id = Spalte 0 an."
+                "  Warning: 'event_id_columns' missing, assuming run_id = column 0."
             )
 
         event_ids = f["event_ids"]
@@ -72,32 +77,32 @@ def count_run_ids(filepath, chunk_size: int = 1_000_000):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Zählt die verwendeten run_ids in einer post-prozessierten HDF5-Datei."
+        description="Count the NC events per run_id in a post-processed HDF5 file."
     )
     parser.add_argument(
         "--data",
         required=True,
-        help="Pfad zur post-prozessierten HDF5-Datei (resum_output_*.hdf5).",
+        help="Post-processed HDF5 file (ncscore_output_*.hdf5).",
     )
     parser.add_argument(
         "--chunk-size",
         type=int,
         default=1_000_000,
-        help="Chunk-Größe für speichereffizientes Lesen (default: 1_000_000).",
+        help="Rows read at once (default: 1_000_000).",
     )
     args = parser.parse_args()
 
     filepath = Path(args.data)
     if not filepath.is_file():
-        print(f"FEHLER: Datei nicht gefunden: {filepath}", file=sys.stderr)
+        print(f"ERROR: file not found: {filepath}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Datei: {filepath}")
+    print(f"File: {filepath}")
     run_id_counts, n_events = count_run_ids(filepath, chunk_size=args.chunk_size)
 
     n_unique = len(run_id_counts)
-    print(f"\nAnzahl verwendeter run_ids: {n_unique}")
-    print(f"Anzahl Events gesamt:       {n_events:,}")
+    print(f"\nNumber of run_ids: {n_unique}")
+    print(f"Number of events:  {n_events:,}")
 
     print("\nrun_id    Events")
     print("------    ------")

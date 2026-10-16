@@ -1,8 +1,22 @@
 #!/usr/bin/env python3
 """
-Volume Hit Spectrum Analysis with Chunked Processing
+Photon-hit spectra grouped by the physical volume in which the neutron was captured.
 
-Memory-efficient analysis for large HDF5 files using chunked reading.
+Reads post-processed HDF5 files (output of the src/core scripts), takes the
+capture volume of every NC from the volID column of phi_matrix and maps it to a
+semantic group (germanium detectors, PMTs, Tyvek foils, cryostat, water, ...)
+via the name patterns in VolumeGrouper. For every group it histograms, per NC,
+  * the total number of photon hits (sum over target_matrix), and
+  * the number of voxels with at least one hit,
+normalized to the number of NCs in the group. This shows how the detectable
+light depends on where the capture happened.
+
+The target matrix is read in chunks sized to the available memory, so files with
+millions of NCs can be analyzed. Volumes that match no pattern are listed in
+unmatched_volumes.txt.
+
+Outputs (in --output): volume_hit_spectra_summed_hits.png,
+volume_hit_spectra_unique_voxels.png, unmatched_volumes.txt
 
 Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 Date: 2026-01-08
@@ -22,12 +36,16 @@ import traceback
 
 
 # ============================================================================
-# Volume Grouping Patterns (unverändert)
+# Volume Grouping Patterns
 # ============================================================================
 
 class VolumeGrouper:
     """
-    Maps individual volume names to semantic groups using regex patterns.
+    Maps physical volume names to semantic groups.
+
+    Names are first compared with explicit single-name groups and then with the
+    regex patterns in order; the first match wins. Names matching nothing are
+    assigned to "unmatched".
     """
     
     def __init__(self):
@@ -275,10 +293,7 @@ class VolumeHitAnalyzer:
             hdf5_path: Path to HDF5 file
             chunk_size: Events per chunk (auto-calculated if None)
             
-        Key difference from original:
-            - Does NOT load entire target matrix into memory
-            - Processes chunks sequentially
-            - Minimal memory footprint per chunk
+        Only one chunk of the target matrix is held in memory at a time.
         """
         print(f"\nProcessing: {hdf5_path.name}")
         
@@ -369,7 +384,7 @@ class VolumeHitAnalyzer:
 
 
 # ============================================================================
-# Visualization (unverändert, aber kompakter)
+# Visualization
 # ============================================================================
 
 class HitSpectrumPlotter:
@@ -471,7 +486,7 @@ class HitSpectrumPlotter:
 
 
 # ============================================================================
-# Validation and Reporting (unverändert)
+# Reporting
 # ============================================================================
 
 def write_unmatched_report(unmatched_names: Set[str], output_path: Path) -> None:
@@ -528,7 +543,7 @@ def parse_arguments() -> argparse.Namespace:
         epilog="""
 Example:
   python %(prog)s \\
-    --data /path/to/resum_output_0_train.hdf5 \\
+    --data /path/to/ncscore_output_0.hdf5 \\
     --mapping /path/to/globalPhysVolMappings.json \\
     --output ./analysis_results \\
     --chunk-size 10000

@@ -1,4 +1,17 @@
 # Author: Thomas Buerger (University of Tübingen)
+"""
+Value ranges of the ML training data, used to choose normalization factors.
+
+Streams through the training and validation files written by
+zylFullPostprocessingOptimized.py (the diffusion-model data set) and records:
+  1. min/max of every NC feature in phi_matrix (except the categorical matID/volID),
+  2. min/max of the photon hits per region (region_matrix) and of their sum per NC,
+  3. min/max of the photon hits per voxel over the whole target_matrix,
+  4. the number of hit voxels per NC (min, max, mean).
+
+The results are printed and written to analysis_results_{train,validation}.json.
+The input paths are set in the __main__ block.
+"""
 import h5py
 import numpy as np
 import json
@@ -11,41 +24,41 @@ def analyze_hdf5_structure(
     output_json: Union[str, Path] = "analysis_results.json"
 ) -> Dict[str, Any]:
     """
-    Analysiert HDF5-Datei mit Min/Max-Werten für phi-Features, 
-    Target-Regionen und individuelle Targets.
-    
+    Compute the value ranges of phi features, region hits and voxel hits of one file.
+
     Parameters
     ----------
     filepath : str | Path
-        Pfad zur HDF5-Datei
+        Post-processed HDF5 file
     chunk_size : int, default=100_000
-        Chunk-Größe für Memory-effizientes Streaming
+        Number of rows read at once (keeps the memory usage bounded)
     output_json : str | Path, default="analysis_results.json"
-        Ausgabepfad für JSON-Ergebnisse
-        
+        Path of the JSON file the results are written to
+
     Returns
     -------
     Dict[str, Any]
-        Strukturiertes Dictionary mit allen Analysen
+        Results with the keys phi_features, target_regions, target_regions_sum,
+        individual_targets and voxel_hit_multiplicity
     """
-    
+
     results = {
         "phi_features": {},
         "target_regions": {},
         "target_regions_sum": {},
         "individual_targets": {}
     }
-    
+
     with h5py.File(filepath, 'r') as f:
         n_events = f['phi_matrix'].shape[0]
         phi_columns = [c.decode() if isinstance(c, bytes) else c for c in f['phi_columns'][:]]
         region_columns = [c.decode() if isinstance(c, bytes) else c for c in f['region_columns'][:]]
         target_columns = [c.decode() if isinstance(c, bytes) else c for c in f['target_columns'][:]]
         n_targets = len(target_columns)
-        print(f"Analysiere {n_events:,} Events...")
+        print(f"Analyzing {n_events:,} events...")
 
-        # === 1. PHI FEATURES (außer matID, volID) ===
-        print("\n[1/3] Analysiere phi-Features...")
+        # === 1. PHI FEATURES (except the categorical matID and volID) ===
+        print("\n[1/4] Analyzing phi features...")
         excluded = {'matID', 'volID'}
         phi_indices = {name: i for i, name in enumerate(phi_columns) if name not in excluded}
 
@@ -65,8 +78,8 @@ def analyze_hdf5_structure(
 
         results['phi_features'] = phi_stats
 
-        # === 2. TARGET REGIONS ===
-        print("\n[2/3] Analysiere target_regions...")
+        # === 2. TARGET REGIONS (per region and summed per event) ===
+        print("\n[2/4] Analyzing target regions...")
         region_stats = {name: {'min': np.inf, 'max': -np.inf} for name in region_columns}
         sum_stats = {'min': np.inf, 'max': -np.inf}
 
@@ -89,8 +102,8 @@ def analyze_hdf5_structure(
         results['target_regions'] = region_stats
         results['target_regions_sum'] = sum_stats
 
-        # === 3. INDIVIDUAL TARGETS (Voxel-weise) ===
-        print(f"\n[3/4] Analysiere individual targets ({n_targets} Voxel)...")
+        # === 3. INDIVIDUAL TARGETS (hits per voxel, global min/max) ===
+        print(f"\n[3/4] Analyzing individual targets ({n_targets} voxels)...")
         global_target_min = np.inf
         global_target_max = -np.inf
 
@@ -110,8 +123,8 @@ def analyze_hdf5_structure(
             'n_voxels': n_targets
         }
 
-        # === 4. VOXEL HIT MULTIPLICITY PRO EVENT ===
-        print("\n[4/4] Analysiere Voxel-Hit-Multiplizität pro Event...")
+        # === 4. VOXEL HIT MULTIPLICITY (voxels with > 0 photons per event) ===
+        print("\n[4/4] Analyzing voxel hit multiplicity per event...")
         global_min_hits = np.inf
         global_max_hits = -np.inf
         total_hits = 0
@@ -134,72 +147,72 @@ def analyze_hdf5_structure(
             'mean_hits_per_event': round(total_hits / n_events, 2),
             'n_voxels_total': n_targets
         }
-    
+
     # === EXPORT TO JSON ===
-    print(f"\n✓ Analyse abgeschlossen. Exportiere nach {output_json}...")
+    print(f"\n✓ Analysis finished. Exporting to {output_json}...")
     with open(output_json, 'w', encoding='utf-8') as json_file:
         json.dump(results, json_file, indent=2, ensure_ascii=False)
-    
-    print(f"✓ JSON gespeichert: {output_json}")
-    
+
+    print(f"✓ JSON saved: {output_json}")
+
     return results
 
 
 def print_summary(results: Dict[str, Any]) -> None:
     """
-    Druckt zusammengefasste Ergebnisse in die Konsole.
-    
+    Print the results of analyze_hdf5_structure() as a summary table.
+
     Parameters
     ----------
     results : Dict[str, Any]
-        Ergebnis-Dictionary von analyze_hdf5_structure()
+        Result dictionary of analyze_hdf5_structure()
     """
     print("\n" + "="*60)
-    print("ZUSAMMENFASSUNG DER ANALYSE")
+    print("ANALYSIS SUMMARY")
     print("="*60)
-    
+
     print("\n[PHI FEATURES]")
     for key, stats in results['phi_features'].items():
         print(f"  {key:25s}: [{stats['min']:12.4g}, {stats['max']:12.4g}]")
-    
+
     print("\n[TARGET REGIONS]")
     for key, stats in results['target_regions'].items():
         print(f"  {key:25s}: [{stats['min']:6d}, {stats['max']:6d}]")
-    
+
     print("\n[TARGET REGIONS SUM (bot+pit+top+wall)]")
     s = results['target_regions_sum']
-    print(f"  Summe pro Event       : [{s['min']:6d}, {s['max']:6d}]")
-    
-    print("\n[INDIVIDUAL TARGETS (Voxel)]")
+    print(f"  Sum per event         : [{s['min']:6d}, {s['max']:6d}]")
+
+    print("\n[INDIVIDUAL TARGETS (voxels)]")
     t = results['individual_targets']
-    print(f"  Min über alle Voxel   : {t['min_over_all_voxels']:6d}")
-    print(f"  Max über alle Voxel   : {t['max_over_all_voxels']:6d}")
-    print(f"  Anzahl Voxel          : {t['n_voxels']:6d}")
+    print(f"  Min over all voxels   : {t['min_over_all_voxels']:6d}")
+    print(f"  Max over all voxels   : {t['max_over_all_voxels']:6d}")
+    print(f"  Number of voxels      : {t['n_voxels']:6d}")
     print("="*60)
 
-    print("\n[VOXEL HIT MULTIPLICITY (Voxel mit >0 Photonen pro Event)]")
+    print("\n[VOXEL HIT MULTIPLICITY (voxels with >0 photons per event)]")
     h = results['voxel_hit_multiplicity']
-    print(f"  Min Hits/Event        : {h['min_hits_per_event']:6d}")
-    print(f"  Max Hits/Event        : {h['max_hits_per_event']:6d}")
-    print(f"  Mean Hits/Event       : {h['mean_hits_per_event']:10.2f}")
-    print(f"  Voxel gesamt          : {h['n_voxels_total']:6d}")
+    print(f"  Min hits/event        : {h['min_hits_per_event']:6d}")
+    print(f"  Max hits/event        : {h['max_hits_per_event']:6d}")
+    print(f"  Mean hits/event       : {h['mean_hits_per_event']:10.2f}")
+    print(f"  Voxels in total       : {h['n_voxels_total']:6d}")
 
 
-# === HAUPTAUSFÜHRUNG ===
+# === MAIN ===
 if __name__ == "__main__":
-    # Analysiere beide Dateien
+    # Analyze the training and the validation file
     for dataset_name in ["train", "validation"]:
         hdf5_file = f"/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/MLFormatHomogeneousNCsZylSSD300PMTs/ncscore_output_0_{dataset_name}.hdf5"
         output_json = f"analysis_results_{dataset_name}.json"
-        
+
         print(f"\n{'='*60}")
-        print(f"ANALYSIERE: {dataset_name.upper()}")
+        print(f"ANALYZING: {dataset_name.upper()}")
         print(f"{'='*60}")
-        
+
         results = analyze_hdf5_structure(
             filepath=hdf5_file,
             chunk_size=100_000,
             output_json=output_json
         )
-        
+
         print_summary(results)
