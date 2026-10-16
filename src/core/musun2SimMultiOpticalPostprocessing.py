@@ -77,9 +77,6 @@ class ProgressTracker:
     optical scan has finished ('sim2_scan_complete') and the number of
     completely written output rows ('rows_committed'); scan_checkpoint.npz
     stores the scan result. Both are removed after a successful run.
-
-    The class is shared with zylFullPostprocessingOptimized.py; the methods for
-    per-file progress and the train/validation split are not used here.
     """
 
     def __init__(self, output_dir, output_file):
@@ -920,7 +917,7 @@ def checkRadialMomentumVectorized(x, y, z, px, py, pz):
 
 
 # ============================================================================
-# Train/Val Split and event weight
+# Event weight
 # ============================================================================
 
 def calculate_weight_from_files(files: list[str], sample_size: Optional[int] = None) -> float:

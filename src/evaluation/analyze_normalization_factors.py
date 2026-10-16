@@ -1,6 +1,7 @@
 # Author: Thomas Buerger (University of Tübingen)
 """
-Value ranges of the ML training data, used to choose normalization factors.
+Minimum and maximum of the diffusion-model training data, used to find a suitable
+normalization for the diffusion model.
 
 Streams through the training and validation files written by
 zylFullPostprocessingOptimized.py (the diffusion-model data set) and records:

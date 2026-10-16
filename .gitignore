@@ -5,6 +5,7 @@ data/processed/
 .env
 .vscode
 *.png
+!docs/*.png
 analysis_results*
 *.md
 *local.json

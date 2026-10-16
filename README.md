@@ -2,10 +2,11 @@
 
 Post-processing of Geant4/[remage](https://github.com/legend-exp/remage) simulations of neutron captures in the
 LEGEND-1000 water tank. The scripts turn raw HDF5 simulation output into compact, ML-ready datasets
-that are used to optimize the photodetector (PMT) placement of a neutron-capture detector.
+that are used to optimize the PMT placement of the neutron tagger, the photomultiplier system of the
+water tank.
 
-This repository is part of my master's thesis *"Machine Learning Detector Optimization in LEGEND-1000
-with Monte Carlo Simulations"* (Eberhard Karls Universität Tübingen).
+This repository is part of my master's thesis *"Optimisation of the LEGEND-1000 Neutron Tagger Using a
+Surrogate Monte Carlo Simulation"* (Eberhard Karls Universität Tübingen).
 
 ## Background
 
@@ -17,7 +18,15 @@ detector. A capture emits a gamma cascade, which produces optical photons that c
 In the simulation, the inner surfaces of the tank (regions `pit`, `bot`, `wall` and `top`) are a
 **sensitive surface detector (SSD)**, whose optical properties are an overlay of those of the PMTs
 that can be placed and of the reflective foil that lines the rest of the wall. The SSD is divided into
-**9583 voxels**, square tiles of 195 mm (the area of the sensitive cathode with 110 mm radius). Every voxel is a possible PMT position. For every simulated NC, this repository counts the detected photons per voxel.
+**9583 voxels**, square tiles of 195 mm × 195 mm, which is the area of a PMT cathode with 110 mm
+radius. Each voxel stands for one PMT position; 8569 of them can actually be occupied by a PMT, the
+others (grey in the figure) cannot. For every simulated NC, this repository counts the detected
+photons on all 9583 voxels; voxelSelection restricts the choice to the valid ones.
+
+<p align="center">
+  <img src="docs/ssd_voxel_geometry.png" width="520"
+       alt="SSD voxel geometry: pit, bottom, wall and top surfaces of the water tank divided into 9583 voxels">
+</p>
 
 ## Pipeline overview
 
@@ -41,14 +50,14 @@ flowchart LR
 
 The output is used in two ways:
 
-- **Voxel selection** ([voxelSelection](https://github.com/UniThommi/voxelSelection)): a greedy
-  algorithm selects the voxels (PMT positions) based on the muon → NC relation and the NC light.
-  Input: the MUSUN workflow.
-- **Surrogate model** ([diffusionSSD](https://github.com/UniThommi/diffusionSSD)): a diffusion model
-  learns the voxel hit pattern of an NC from its properties. Input: the homogeneous-NC workflow, split
-  into training and validation data.
+- **Voxel selection** ([voxelSelection](https://github.com/UniThommi/voxelSelection)): the NCs from
+  the MUSUN muon simulation are used to optimize the detector. A greedy algorithm selects the voxels
+  (PMT positions) based on the muon → NC relation and the NC light.
+- **Surrogate model** ([diffusionSSD](https://github.com/UniThommi/diffusionSSD)): only the
+  homogeneous NCs are used to train the diffusion model, which learns the voxel hit pattern of an NC
+  from its properties. They are split into training and validation data.
 
-The MUSUN muon and homogeneous NCs simulations are produced with the remage applications in
+The MUSUN muon, optical and homogeneous-NC simulations are produced with the remage applications in
 [RMGApplications](https://github.com/UniThommi/RMGApplications).
 
 ## Core processing (`src/core/`)
@@ -154,6 +163,7 @@ simPostProcessing/
 │   ├── mappings/        global material (14) and physical-volume (576) ID mappings (JSON)
 │   └── voxels/          voxel definition of the SSD: index, center, corners, region (JSON)
 ├── data_structure/      HDF5 layouts of the raw sim1 and sim2 files and of the ML output
+├── docs/                figures used in this README
 └── requirements.txt
 ```
 
@@ -173,7 +183,7 @@ IDs never change.
 | Script | Content |
 |---|---|
 | `analyse_physVol_groups.py` | photon-hit spectra grouped by the physical volume in which the neutron was captured |
-| `analyze_normalization_factors.py` | value ranges of features and targets of the diffusion-model data, used to choose normalization factors |
+| `analyze_normalization_factors.py` | minimum and maximum of the features and targets of the diffusion-model data, used to find a suitable normalization for the diffusion model |
 | `count_run_ids.py` | number of NCs per run in an output file |
 | `unique_phys_vol_names_gdml.py` | list of the physical volume names in the GDML geometry |
 | `analyze_orphaned_photons_from_raw.ipynb` | exploratory checks of the raw homogeneous-NC data: photon–NC matching, photon times, NC properties |
@@ -244,7 +254,7 @@ The command-line scripts print all options with `--help`.
 ## Related repositories
 
 - [RMGApplications](https://github.com/UniThommi/RMGApplications): Geant4/remage applications for the
-  MUSUN muon and optical simulations
+  MUSUN muon, optical and homogeneous-NC simulations
 - [voxelSelection](https://github.com/UniThommi/voxelSelection): greedy PMT placement on the voxel hit
   data
 - [diffusionSSD](https://github.com/UniThommi/diffusionSSD): diffusion model trained on the
