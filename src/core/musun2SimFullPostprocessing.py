@@ -22,6 +22,8 @@ Zeitfilter:
   → Fenster: 0 <= relative_time <= 200 ns
 
 Progress-Tracking: Status wird in einer JSON-Datei gespeichert.
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 import os

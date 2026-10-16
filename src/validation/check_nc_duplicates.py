@@ -1,3 +1,4 @@
+# Author: Thomas Buerger (University of Tübingen)
 """check_nc_duplicates.py
 
 Checks whether any NC identified by (muon_id, nc_id) appears in more than one

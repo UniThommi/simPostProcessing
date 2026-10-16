@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Author: Thomas Buerger (University of Tübingen)
 """
 Neutron Capture Count Verification Script
 

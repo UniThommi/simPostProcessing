@@ -3,7 +3,7 @@
 Post-Processing für Drei-Quellen-Workflow (Multi-Optik):
   Simulation 1: Muon → Neutron Capture (NC) Daten (MyNeutronCaptureOutput), KEINE optischen Photonen
   Simulation 2: Gamma-Vertices aus NCs → Optische Photonen (eine Simulation pro Run, -i2)
-  Simulation 3: Mehrfache optische Simulationen derselben NC-Events (-i3),
+  Simulation 3+: Mehrfache optische Simulationen derselben NC-Events (-i3),
                 Struktur: run_NNN/sim_NNN/output_t*.hdf5
 
 Workflow:
@@ -22,6 +22,8 @@ Zuordnung Sim1 ↔ Sim2/Sim3:
 Zeitfilter:
   relative_time = photon_time - nC_time (aus Sim1)
   Muss >= 0 sein; Fenster: 0 <= relative_time <= 200 ns
+
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 """
 
 import os

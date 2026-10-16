@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Author: Thomas Buerger (University of Tübingen)
 """
 Extract unique physical volume names from GDML file.
 

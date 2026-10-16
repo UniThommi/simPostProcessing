@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Author: Thomas Buerger (University of Tübingen)
 """
 Zählt die verwendeten run_ids in einer post-prozessierten HDF5-Datei.
 

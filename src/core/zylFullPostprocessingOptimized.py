@@ -1,3 +1,5 @@
+# Author: Thomas Bürger, Eberhard Karls Universität Tübingen
+
 import os
 import glob
 import json
@@ -21,7 +23,7 @@ import shutil
 """
 Das Post-Processing beinhaltet mehrere Schritte:
 1. Das lokale Material Mapping auf das globale ändern und das globale gegebenenfalls erweitern
-2. Photonen filtern die von dem SSD von außen aufgefangen wurden. In der wechten Welt können nur Photonen die von innen kommen detektiert werden.
+2. Photonen filtern die von dem SSD von außen aufgefangen wurden. In der echten Welt können nur Photonen die von innen kommen detektiert werden.
 3. Die Photonen den Voxeln zuordnen
 4. Alle gelevanten Daten in ein hdf5 File schreiben was dem RESuM Format entspricht.
 
@@ -365,7 +367,7 @@ def create_global_volume_mapping(all_volumes, existing_mapping_path):
     return global_mapping
 
 def collect_all_materials_first(files):
-    """Sammelt alle Materialien aus allen Files VOR der parallelen Verarbeitung"""
+    """Sammelt alle Materialien aus allen Files vor der parallelen Verarbeitung."""
     print("Sammle alle Materialien aus allen Files...")
     all_materials = set()
     
@@ -383,7 +385,7 @@ def collect_all_materials_first(files):
 
 def collect_all_volumes_first(files):
     """
-    Sammelt alle physikalischen Volumes aus allen Files mit Sanitization.
+    Sammelt alle physikalischen Volumes aus allen Files vor der parallelen Verarbeitung.
     """
     print("Sammle alle physikalischen Volumes aus allen Files...")
     all_volumes = set()
@@ -635,7 +637,7 @@ def defineZylinder(geometry_name, valid_detectors=None):
             print(name)
         sys.exit()
 
-    # Default Detector UIDs
+    # Default Detector UIDs (aus REMAGE Detektor Registrierung)
     if valid_detectors is None:
         valid_detectors = [1965, 1966, 1967, 1968]
 
@@ -693,7 +695,7 @@ def process_single_file(args):
     # Anpassbare Chunk-Größe basierend auf verfügbarem Speicher
     available_mem_gb = psutil.virtual_memory().available / (1024**3)
     if available_mem_gb > 400:
-        CHUNK_SIZE = 50000  # Neu für 500GB Systeme
+        CHUNK_SIZE = 50000  
     elif available_mem_gb > 200:
         CHUNK_SIZE = 30000
     elif available_mem_gb > 50:
@@ -1477,6 +1479,7 @@ def create_or_open_output_file(output_path, file_index, voxel_data, mat_map, vol
     fid = h5py.h5f.create(output_file.encode(), h5py.h5f.ACC_TRUNC, fcpl=fcpl, fapl=fapl)
     with h5py.File(fid) as out:
         # === Konsolidierte 2D-Datasets ===
+        # lzf Compression für schnelles Lesen beim Training
         out.create_dataset(
             "target_matrix",
             shape=(0, n_voxels),

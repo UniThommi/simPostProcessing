@@ -4,7 +4,7 @@ Volume Hit Spectrum Analysis with Chunked Processing
 
 Memory-efficient analysis for large HDF5 files using chunked reading.
 
-Author: Scientific Data Pipeline
+Author: Thomas Bürger, Eberhard Karls Universität Tübingen
 Date: 2026-01-08
 """
 
