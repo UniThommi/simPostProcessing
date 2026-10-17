@@ -132,6 +132,17 @@ All row-aligned datasets have one row per NC (`N` rows):
 | `event_ids` | N × 3 (MUSUN) or N × 2 (homogeneous NCs), int64 | `(run_id, muon_id, nc_id)` or `(run_id, nc_id)`, names in `event_id_columns` |
 | `weights` | N, float32 | constant 1/N_NC, with N_NC estimated from a sample of input files (not used by the downstream tools) |
 
+Each row of `target_matrix` is the light pattern of one NC on the SSD:
+
+<p align="center">
+  <img src="docs/nc_voxel_hits.png" width="520"
+       alt="Detected photons per SSD voxel for one neutron capture, with the capture position marked in red">
+</p>
+
+*Voxel hits of one randomly chosen NC: detected photons per voxel (`target_matrix`) as a heat map, the
+capture position from `phi_matrix` as a red point and the outline of the SSD (pit, bot, wall, top).
+Created with `python src/evaluation/plot_nc_voxel_hits.py --data <output file>`.*
+
 The features in `phi_matrix`:
 
 - **Position:** `xNC_mm`, `yNC_mm`, `zNC_mm`, `r_NC_mm`, `phi_NC_rad`, and the signed distances to the
@@ -185,6 +196,7 @@ IDs never change.
 | `analyse_physVol_groups.py` | photon-hit spectra grouped by the physical volume in which the neutron was captured |
 | `analyze_normalization_factors.py` | minimum and maximum of the features and targets of the diffusion-model data, used to find a suitable normalization for the diffusion model |
 | `count_run_ids.py` | number of NCs per run in an output file |
+| `plot_nc_voxel_hits.py` | 3D view of the voxel hits and the position of one (random or selected) NC, see [Output format](#output-format) |
 | `unique_phys_vol_names_gdml.py` | list of the physical volume names in the GDML geometry |
 | `analyze_orphaned_photons_from_raw.ipynb` | exploratory checks of the raw homogeneous-NC data: photon–NC matching, photon times, NC properties |
 
