@@ -1,0 +1,4 @@
+{
+  "scratch": "/path/to/scratch/data",
+  "cfs": "/path/to/project/directory"
+}

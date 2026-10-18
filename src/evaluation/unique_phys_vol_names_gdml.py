@@ -13,8 +13,12 @@ The GDML path is set in main().
 """
 
 import re
+import sys
 from pathlib import Path
 from typing import Set
+
+sys.path.append(str(Path(__file__).resolve().parents[1]))  # src/, for local_paths
+from local_paths import required_local_path
 
 
 def extract_physvol_names(gdml_path: Path) -> Set[str]:
@@ -66,9 +70,9 @@ def main() -> None:
     """Main execution function."""
     
     # Input/Output paths
-    gdml_path = Path("/global/cfs/projectdirs/legend/users/tbuerger/"
-                     "sim/RMGApplications/01-FullCosmogenics/gdml/"
-                     "currentDistZylPMT300PMTs.gdml")
+    # Root directory from local_paths.json (git-ignored)
+    gdml_path = Path(required_local_path(
+        "cfs", "sim/RMGApplications/01-FullCosmogenics/gdml/currentDistZylPMT300PMTs.gdml"))
     output_path = Path("physvol_names.txt")
     
     # Validate input

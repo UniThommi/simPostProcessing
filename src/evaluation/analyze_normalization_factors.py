@@ -18,6 +18,10 @@ import numpy as np
 import json
 from typing import Dict, Any, Union
 from pathlib import Path
+import sys
+
+sys.path.append(str(Path(__file__).resolve().parents[1]))  # src/, for local_paths
+from local_paths import required_local_path
 
 def analyze_hdf5_structure(
     filepath: Union[str, Path],
@@ -203,7 +207,11 @@ def print_summary(results: Dict[str, Any]) -> None:
 if __name__ == "__main__":
     # Analyze the training and the validation file
     for dataset_name in ["train", "validation"]:
-        hdf5_file = f"/pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/MLFormatHomogeneousNCsZylSSD300PMTs/ncscore_output_0_{dataset_name}.hdf5"
+        # Root directory from local_paths.json (git-ignored)
+        hdf5_file = required_local_path(
+            "scratch",
+            f"optPhotonSensitiveSurface/MLFormatHomogeneousNCsZylSSD300PMTs/ncscore_output_0_{dataset_name}.hdf5",
+        )
         output_json = f"analysis_results_{dataset_name}.json"
 
         print(f"\n{'='*60}")

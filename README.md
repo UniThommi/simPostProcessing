@@ -2,7 +2,7 @@
 
 Post-processing of Geant4/[remage](https://github.com/legend-exp/remage) simulations of neutron captures in the
 LEGEND-1000 water tank. The scripts turn raw HDF5 simulation output into compact, ML-ready datasets
-that are used to optimize the PMT placement of the neutron tagger, the photomultiplier system of the
+that are used to optimise the PMT placement of the neutron tagger, the photomultiplier system of the
 water tank.
 
 This repository is part of my master's thesis *"Optimisation of the LEGEND-1000 Neutron Tagger Using a
@@ -51,8 +51,11 @@ flowchart LR
 The output is used in two ways:
 
 - **Voxel selection** ([voxelSelection](https://github.com/UniThommi/voxelSelection)): the NCs from
-  the MUSUN muon simulation are used to optimize the detector. A greedy algorithm selects the voxels
-  (PMT positions) based on the muon → NC relation and the NC light.
+  the MUSUN muon simulation are used to optimise the detector. A greedy algorithm selects the voxels
+  (PMT positions) based on the muon → NC relation and the NC light. voxelSelection first converts the
+  SSD hits into PMT-equivalent hits with per-area PMT/SSD ratios, which it derives and validates
+  against optical simulations of the same NCs with real PMTs; its PMT-matching ratio requires the
+  output of `musun2SimMultiOpticalPostprocessing.py`.
 - **Surrogate model** ([diffusionSSD](https://github.com/UniThommi/diffusionSSD)): only the
   homogeneous NCs are used to train the diffusion model, which learns the voxel hit pattern of an NC
   from its properties. They are split into training and validation data.
@@ -87,7 +90,7 @@ All three scripts share the same processing steps:
    can produce slightly negative time differences: values in [−1 ns, 0) are counted as 0, values below
    −1 ns are treated as an error and abort the run. The homogeneous-NC simulation starts with the
    capture at t = 0, so no tolerance is needed there.
-4. **Voxel assignment.** Each selected photon is assigned to the voxel with the nearest center, using a
+4. **Voxel assignment.** Each selected photon is assigned to the voxel with the nearest centre, using a
    `scipy.spatial.KDTree` that is queried once per chunk of photons. The hits are counted per NC and
    voxel.
 5. **Features and output.** One row is written per NC, including NCs without any detected photon
@@ -97,6 +100,8 @@ All three scripts share the same processing steps:
 PMT with those of the reflective foil, it reflects much more light than a real PMT. A single optical
 simulation therefore yields a lower detection efficiency per voxel than a PMT would have. Summing the
 hits of several optical simulations of the same NCs raises the voxel efficiency to that of a PMT.
+The summed hits exceed the PMT efficiency, and voxelSelection scales them down to it with the
+PMT-matching ratio, derived per area by comparing each voxel with a PMT simulated at the same position.
 
 ### Scalability and robustness
 
@@ -153,11 +158,11 @@ The features in `phi_matrix`:
   components `p_mean_r`, `p_mean_z`
 - **Other:** capture time `nC_time_in_ns` and the <sup>77</sup>Ge flag `nC_flag_Ge77`
 
-Static metadata: the voxel geometry (`voxels/` with center, layer and corners of every voxel, and
-`voxel_metadata` with region flags and cylindrical coordinates of the voxel centers), the global
+Static metadata: the voxel geometry (`voxels/` with `center`, `layer` and `corners` of every voxel, and
+`voxel_metadata` with region flags and cylindrical coordinates of the voxel centres), the global
 mappings (`mat_map/`, `vol_map/`), the SSD radius (`theta/inner_radius_in_mm`) and `primaries`. In
 the MUSUN output, `primaries` is the number of simulated muons (runs × `--muons-per-run`); it is needed
-to normalize <sup>77</sup>Ge rates to all muons, because the simulation output only contains muons
+to normalise <sup>77</sup>Ge rates to all muons, because the simulation output only contains muons
 that interacted. In the homogeneous-NC output it is the number of NCs.
 
 The complete layouts of the raw inputs and of the output are listed in `data_structure/`.
@@ -172,9 +177,11 @@ simPostProcessing/
 │   ├── evaluation/      analyses of raw and post-processed data
 │   ├── hdf5_structure/  analyze_hdf5.py: text dump of the structure of an HDF5 file
 │   ├── mappings/        global material (14) and physical-volume (576) ID mappings (JSON)
-│   └── voxels/          voxel definition of the SSD: index, center, corners, region (JSON)
+│   ├── voxels/          voxel definition of the SSD: index, centre, corners, region (JSON)
+│   └── local_paths.py   reads the machine-specific root directories from local_paths.json
 ├── data_structure/      HDF5 layouts of the raw sim1 and sim2 files and of the ML output
 ├── docs/                figures used in this README
+├── local_paths.example.json  format of the git-ignored local_paths.json
 └── requirements.txt
 ```
 
@@ -194,7 +201,7 @@ IDs never change.
 | Script | Content |
 |---|---|
 | `analyse_physVol_groups.py` | photon-hit spectra grouped by the physical volume in which the neutron was captured |
-| `analyze_normalization_factors.py` | minimum and maximum of the features and targets of the diffusion-model data, used to find a suitable normalization for the diffusion model |
+| `analyze_normalization_factors.py` | minimum and maximum of the features and targets of the diffusion-model data, used to find a suitable normalisation for the diffusion model |
 | `count_run_ids.py` | number of NCs per run in an output file |
 | `plot_nc_voxel_hits.py` | 3D view of the voxel hits and the position of one (random or selected) NC, see [Output format](#output-format) |
 | `unique_phys_vol_names_gdml.py` | list of the physical volume names in the GDML geometry |
@@ -215,9 +222,11 @@ and run the same `pip install` command.
 
 ## Usage
 
-The default paths of the mapping and voxel files point to the author's cluster installation, so pass
-the files in this repository explicitly. Input directories contain one `run_NNN/` subdirectory per
-simulation run when `--nested` is used:
+The mapping and voxel files default to the files in this repository. Machine-specific root
+directories (the author's cluster storage) are read from a git-ignored `local_paths.json` in the
+repository root (format: `local_paths.example.json`); without it, the scripts that need them ask for
+the paths. Input directories contain one `run_NNN/` subdirectory per simulation run when `--nested`
+is used:
 
 ```
 sim1/run_000/output_t0.hdf5, output_t1.hdf5, ...
@@ -268,7 +277,8 @@ The command-line scripts print all options with `--help`.
 - [RMGApplications](https://github.com/UniThommi/RMGApplications): Geant4/remage applications for the
   MUSUN muon, optical and homogeneous-NC simulations
 - [voxelSelection](https://github.com/UniThommi/voxelSelection): greedy PMT placement on the voxel hit
-  data
+  data, derivation and validation of the PMT/SSD ratios that convert SSD hits into PMT hits, and
+  evaluation of the simulated PMT setups
 - [diffusionSSD](https://github.com/UniThommi/diffusionSSD): diffusion model trained on the
   homogeneous-NC data
 

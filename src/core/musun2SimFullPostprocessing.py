@@ -67,6 +67,9 @@ import argparse
 from pathlib import Path
 import shutil
 
+sys.path.append(str(Path(__file__).resolve().parents[1]))  # src/, for local_paths
+from local_paths import local_path
+
 
 # ============================================================================
 # Utility Functions
@@ -1550,16 +1553,20 @@ Examples:
     parser.add_argument('-o', '--output', required=True,
                         help='Output directory')
 
-    # Mapping and voxel files. The defaults point to the author's cluster
-    # installation; pass the files in src/mappings and src/voxels explicitly elsewhere.
+    # Mapping and voxel files. Default: the author's cluster copy if local_paths.json
+    # is configured (see src/local_paths.py), otherwise the files in this repository.
+    src_dir = Path(__file__).resolve().parents[1]
     parser.add_argument('-m', '--material-mapping',
-                        default='/global/cfs/projectdirs/legend/users/tbuerger/postprocessing/src/mappings/globalMaterialMappings.json',
+                        default=(local_path('cfs', 'postprocessing/src/mappings/globalMaterialMappings.json')
+                                 or str(src_dir / 'mappings' / 'globalMaterialMappings.json')),
                         help='Global material mapping (JSON, extended in place with new materials)')
     parser.add_argument('-v', '--volume-mapping',
-                        default='/global/cfs/projectdirs/legend/users/tbuerger/postprocessing/src/mappings/globalPhysVolMappings.json',
+                        default=(local_path('cfs', 'postprocessing/src/mappings/globalPhysVolMappings.json')
+                                 or str(src_dir / 'mappings' / 'globalPhysVolMappings.json')),
                         help='Global physical volume mapping (JSON, extended in place with new volumes)')
     parser.add_argument('-x', '--voxel-file',
-                        default='/global/cfs/projectdirs/legend/users/tbuerger/postprocessing/src/voxels/currentDistZylVoxelsPMTSize.json',
+                        default=(local_path('cfs', 'postprocessing/src/voxels/currentDistZylVoxelsPMTSize.json')
+                                 or str(src_dir / 'voxels' / 'currentDistZylVoxelsPMTSize.json')),
                         help='Voxel definition of the SSD (JSON)')
 
     # Processing options

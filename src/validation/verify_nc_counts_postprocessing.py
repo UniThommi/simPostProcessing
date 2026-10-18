@@ -302,8 +302,8 @@ def parse_arguments() -> argparse.Namespace:
 Examples:
   # Nested structure (one subdirectory per run)
   python %(prog)s \\
-    --sim-path /pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/rawHomogeneousNCsSSD300PMTs \\
-    --output-path /pscratch/sd/t/tbuerger/data/optPhotonSensitiveSurface/MLFormatHomogeneousNCsZylSSD300PMTs/ \\
+    --sim-path /path/to/rawHomogeneousNCsSSD300PMTs \\
+    --output-path /path/to/MLFormatHomogeneousNCsZylSSD300PMTs/ \\
     --nested
 
   # Files directly in the simulation directory

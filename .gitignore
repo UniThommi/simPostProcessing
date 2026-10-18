@@ -9,3 +9,4 @@ data/processed/
 analysis_results*
 *.md
 *local.json
+local_paths.json
